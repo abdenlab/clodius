@@ -661,7 +661,7 @@ def generate_tiles(filepath, tile_ids):
             sorted_resolutions = sorted(
                 [int(r) for r in tileset_info["resolutions"]], reverse=True
             )
-            if zoom_level > len(sorted_resolutions):
+            if zoom_level >= len(sorted_resolutions):
                 # this tile has too high of a zoom level specified
                 continue
 
