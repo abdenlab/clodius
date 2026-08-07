@@ -1,6 +1,5 @@
 import functools as ft
 import logging
-import math
 import re
 import numpy as np
 import pandas as pd
@@ -273,21 +272,24 @@ def get_bigwig_tile(
     for (cid, start, end), x in zip(cids_starts_ends, arrays):
         current_data_position += end - start
 
-        start_pos = math.floor(start / binsize)
-        end_pos = math.ceil(end / binsize)
-
-        # print("start", start, "end", end)
-        # print("start_pos", start_pos, "end_pos", end_pos)
-        # print("# bins calc", end_pos - start_pos)
-        # print("# bins actual", len(x))
-
-        if start_pos >= end_pos:
+        if len(x) == 0:
             continue
 
-        current_binned_data_position += binsize * (end_pos - start_pos)
+        # Count the bins actually returned. fetch_data asks for
+        # ceil((end - start) / binsize) bins; the previous accounting used
+        # ceil(end / binsize) - floor(start / binsize), which is one larger
+        # whenever `start` is not bin-aligned -- i.e. on the first interval of
+        # any tile that does not begin on a chromosome boundary.
+        current_binned_data_position += binsize * len(x)
         offset = current_binned_data_position - current_data_position
 
-        if offset > binsize:
+        # Each chromosome contributes ceil(len / binsize) bins but only `len`
+        # bp of data, so every boundary over-represents by up to one bin. Once
+        # that drift reaches a full bin, drop one to resynchronize with the
+        # client's uniform lattice. The test must be >=, not >: at exactly one
+        # bin of drift the surplus bin is already present, and keeping it emits
+        # tile_size + 1 bins.
+        if offset >= binsize:
             current_binned_data_position -= binsize
             x = x[:-1]
 
