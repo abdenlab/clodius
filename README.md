@@ -1,13 +1,10 @@
 # Clodius
 
 [![Python](https://img.shields.io/pypi/v/clodius)](https://pypi.org/project/clodius)
-[![Build Status](https://travis-ci.org/higlass/clodius.svg?branch=develop)](https://travis-ci.org/higlass/clodius)
+[![CI](https://github.com/higlass/clodius/actions/workflows/ci.yml/badge.svg)](https://github.com/higlass/clodius/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-📖-red.svg?colorB=6680ff)](https://docs.higlass.io/data_preparation.html)
 
-Displaying large amounts of data often requires first turning it into
-not-so-large amounts of data. Clodius is a program and library designed
-to aggregate large datasets to make them easy to display at different
-resolutions.
+Displaying large amounts of data often requires first turning it into not-so-large amounts of data. Clodius is a program and library designed to aggregate large datasets to make them easy to display at different resolutions.
 
 ## Demo
 
@@ -20,7 +17,7 @@ pip install clodius
 And use it aggregate a bigWig file:
 
 ```shell
-curl https://raw.githubusercontent.com/hms-dbmi/clodius/develop/test/sample_data/geneAnnotationsExonsUnions.short.bed \
+curl https://raw.githubusercontent.com/higlass/clodius/main/test/sample_data/geneAnnotationsExonsUnions.short.bed \
   > /tmp/sample.short.bed
 clodius aggregate bedfile /tmp/sample.short.bed
 ```
@@ -47,13 +44,13 @@ The output files can then be displayed using [higlass-manage](https://github.com
 
 ## Development
 
-
-The recommended way to develop `clodius` is to use a [conda](https://conda.io/docs/intro.html) environment and
-install `clodius` with develop mode:
+Clodius uses [uv](https://docs.astral.sh/uv/) for dependency management. `uv sync` creates the virtual environment and installs the project in editable mode along with the `dev` dependency group:
 
 ```shell
-pip install -e ".[dev]"
+uv sync
 ```
+
+Commands then run through `uv run`, which is what CI does.
 
 ## Test Fixtures (Git LFS)
 
@@ -91,16 +88,14 @@ git lfs pull
 
 ## Testing
 
-
 The unit tests for clodius can be run using [pytest](https://docs.pytest.org/en/latest/):
 
 ```shell
-pytest
+uv run pytest
 ```
 
-Individual unit tests can be specified by indicating the file and function
-they are defined in:
+Individual unit tests can be specified by indicating the file and function they are defined in:
 
 ```shell
-pytest test/cli_test.py:test_clodius_aggregate_bedgraph
+uv run pytest test/cli_test.py::test_clodius_aggregate_bedgraph
 ```
