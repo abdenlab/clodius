@@ -1,7 +1,7 @@
 # Clodius
 
 [![Python](https://img.shields.io/pypi/v/clodius)](https://pypi.org/project/clodius)
-[![Build Status](https://travis-ci.org/higlass/clodius.svg?branch=develop)](https://travis-ci.org/higlass/clodius)
+[![CI](https://github.com/higlass/clodius/actions/workflows/ci.yml/badge.svg)](https://github.com/higlass/clodius/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-📖-red.svg?colorB=6680ff)](https://docs.higlass.io/data_preparation.html)
 
 Displaying large amounts of data often requires first turning it into
@@ -20,7 +20,7 @@ pip install clodius
 And use it aggregate a bigWig file:
 
 ```shell
-curl https://raw.githubusercontent.com/hms-dbmi/clodius/develop/test/sample_data/geneAnnotationsExonsUnions.short.bed \
+curl https://raw.githubusercontent.com/higlass/clodius/main/test/sample_data/geneAnnotationsExonsUnions.short.bed \
   > /tmp/sample.short.bed
 clodius aggregate bedfile /tmp/sample.short.bed
 ```
