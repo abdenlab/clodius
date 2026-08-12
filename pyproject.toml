@@ -33,7 +33,9 @@ dependencies = [
     "biopython",
     "shortuuid",
     "pybigtools",
-    "scipy"
+    "scipy",
+    "higlass-python>=1.4.0",
+    "bioframe>=0.8.0",
 ]
 requires-python = ">=3.12"
 license = { text = "MIT" }
@@ -44,7 +46,7 @@ urls = { homepage = "https://github.com/higlass/clodius" }
 clodius = "clodius.cli.aggregate:cli"
 tsv_to_mrmatrix = "clodius._tsv_to_mrmatrix:main"
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "bumpversion",
     "pytest",
