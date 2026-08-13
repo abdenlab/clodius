@@ -12,7 +12,11 @@ import numpy as np
 
 @dataclass(frozen=True, slots=True)
 class GenomicRange:
-    """A range on a single chromosome."""
+    """A range on a single chromosome.
+
+    Internal representation is zero-based, half-open. Chromosome name is
+    optional to represent out-of-bounds intervals.
+    """
 
     cid: int
     name: str | None
@@ -27,6 +31,31 @@ class GenomicRange:
         if self.name is None:
             raise ValueError("Out-of-bounds range")
         return (self.name, self.start, self.end)
+
+    def to_ucsc(self, coords="11") -> str:
+        """Return a UCSC-style string.
+
+        Parameters
+        ----------
+        coords : {"01", "11"}, default "11"
+            Coordinate convention to use. "01" is zero-based, half-open. "11"
+            is one-based, fully-closed.
+
+        Returns
+        -------
+        str
+            A string of the form ``chr:start-end``. Raises ValueError if the
+            coordinate convention is unrecognized.
+        """
+        if self.name is None:
+            raise ValueError("Out-of-bounds range")
+        match coords:
+            case "01":
+                return f"{self.name}:{self.start}-{self.end}"
+            case "11":
+                return f"{self.name}:{self.start + 1}-{self.end}"
+            case _:
+                raise ValueError(f"Invalid coordinate convention: {coords}")
 
 
 class Chromsizes:
