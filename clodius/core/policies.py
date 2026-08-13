@@ -11,19 +11,15 @@ as separate fields until someone decides which is right:
 - max query size is 1_000_000 in ``tabix.py:282`` but 450_000 in ``vcf.py:152``
 - max entries per tile is 1024 (bedfile), 512 (bedpe), 4096 (hibed) for the
   identical bedlike payload
-
-See section 1.4 of _scratch/clodius-contracts-and-interface.md.
 """
 
 from __future__ import annotations
 import hashlib
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable, Sequence, TypeVar
 
 T = TypeVar("T")
-
-
-from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,24 +31,28 @@ class TilePolicy:
 
     # Refuse tiles spanning more than this much coordinate space.
     # bam.py:559, vcf.py:90 (advertised as ``max_tile_width`` in tileset_info).
+    # Declared, not yet consumed: no tiles_v2 tileset enforces a width limit.
     max_tile_width: int | None = None
 
     # Cap on records returned per tile. bedfile.py:263 (overridable today via
-    # the untyped ``settings["MAX_BEDFILE_ENTRIES"]``).
-    max_entries_per_tile: int = 1024
+    # the untyped ``settings["MAX_BEDFILE_ENTRIES"]``). Read by bed and bigbed.
+    max_entries_per_tile: int | None = 1024
 
     # Estimated bytes a tabix/bai range query may touch. tabix.py:282.
-    max_query_size: int = 1_000_000
+    # Declared, not yet consumed: no tiles_v2 tileset estimates query size.
+    max_query_size: int | None = 1_000_000
 
     # Refuse to whole-file-load an unindexed file larger than this.
-    # bedfile.py:89, bedpe.py:100.
-    max_unindexed_filesize: int = 20_000_000
+    # bedfile.py:89, bedpe.py:100. Read by bed.
+    max_unindexed_filesize: int | None = 20_000_000
 
     # fasta.py:174 -- refuse sequence tiles more than N levels out.
+    # Declared, not yet consumed: fasta has no tiles_v2 tileset.
     max_zoom_diff: int | None = 3
 
     # bigbed.py:222 -- chromosomes sampled per tile when a genome has many.
-    max_chroms_sampled: int = 128
+    # Read by bigbed.
+    max_chroms_sampled: int | None = 128
 
     def with_(self, **changes) -> TilePolicy:
         """Return a copy with ``changes`` applied."""
@@ -70,13 +70,12 @@ class GridPolicy(str, Enum):
 
     # Concatenate chromosome segments in order, dropping trailing bins whenever
     # the accumulated over-representation reaches a threshold.
+    #
+    # The only policy implemented today. A positional SCATTER alternative --
+    # place each chromosome-level bin at the global index its absolute start
+    # falls in -- lands with the PR that needs it, along with the tile-relative
+    # grid machinery it requires.
     SEQUENTIAL = "sequential"
-
-    # Place each chromosome-level bin at the global index its absolute start
-    # falls in. Positionally exact -- nothing shifts -- but the segmented grid
-    # over-supplies, so bins collide at chromosome boundaries and the later
-    # write silently wins. Interior gaps cannot occur; see cooler_v2._place.
-    SCATTER = "scatter"
 
 
 class DensityPolicy(str, Enum):
@@ -124,10 +123,15 @@ def stable_importance(key: str) -> float:
 
 def take_most_important(
     records: Sequence[T],
-    cap: int,
+    cap: int | None,
     importance: Callable[[T], float],
 ) -> list[T]:
     """The ``cap`` most important records, in their original order.
+
+    ``cap`` of ``None`` means no limit, matching :class:`TilePolicy`. A ``cap``
+    of zero or less returns nothing: ``ranked[-0:]`` is the whole list, so
+    without this guard a server configured to serve no records would emit an
+    unbounded tile -- the precise failure the cap exists to prevent.
 
     Deterministic, unlike ``random.choices``, which additionally samples *with
     replacement* and so can return the same record twice while dropping another
@@ -137,6 +141,10 @@ def take_most_important(
     records by coordinate, and keeping genomic order makes the output easier to
     diff against the unthinned set.
     """
+    if cap is None:
+        return list(records)
+    if cap <= 0:
+        return []
     if len(records) <= cap:
         return list(records)
 
