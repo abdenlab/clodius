@@ -17,13 +17,11 @@ See section 1.4 of _scratch/clodius-contracts-and-interface.md.
 
 from __future__ import annotations
 import hashlib
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable, Sequence, TypeVar
 
 T = TypeVar("T")
-
-
-from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True, slots=True)
