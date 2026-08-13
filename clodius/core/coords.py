@@ -8,11 +8,18 @@ from typing import Iterable, Iterator, Literal, Sequence
 
 import bioframe
 import numpy as np
+import pandas as pd
+
+from clodius.core.errors import TileOutOfBounds
 
 
 @dataclass(frozen=True, slots=True)
 class GenomicRange:
-    """A range on a single chromosome."""
+    """A range on a single chromosome.
+
+    Internal representation is zero-based, half-open. Chromosome name is
+    optional to represent out-of-bounds intervals.
+    """
 
     cid: int
     name: str | None
@@ -27,6 +34,31 @@ class GenomicRange:
         if self.name is None:
             raise ValueError("Out-of-bounds range")
         return (self.name, self.start, self.end)
+
+    def to_ucsc(self, coords="11") -> str:
+        """Return a UCSC-style string.
+
+        Parameters
+        ----------
+        coords : {"01", "11"}, default "11"
+            Coordinate convention to use. "01" is zero-based, half-open. "11"
+            is one-based, fully-closed.
+
+        Returns
+        -------
+        str
+            A string of the form ``chr:start-end``. Raises ValueError if the
+            coordinate convention is unrecognized.
+        """
+        if self.name is None:
+            raise ValueError("Out-of-bounds range")
+        match coords:
+            case "01":
+                return f"{self.name}:{self.start}-{self.end}"
+            case "11":
+                return f"{self.name}:{self.start + 1}-{self.end}"
+            case _:
+                raise ValueError(f"Invalid coordinate convention: {coords}")
 
 
 class Chromsizes:
@@ -60,8 +92,8 @@ class Chromsizes:
     def from_assembly(
         cls,
         assembly: str,
-        roles: list[str] | Literal["all"] | None,
-        units: list[str] | Literal["all"] | None,
+        roles: list[str] | Literal["all"] | None = None,
+        units: list[str] | Literal["all"] | None = None,
     ) -> Chromsizes:
         return cls.from_series(
             bioframe.assembly_info(assembly, roles, units).chromsizes
@@ -80,9 +112,7 @@ class Chromsizes:
             [name, length] for name, length in zip(self._names, self._lengths)
         ]
 
-    def to_series(self):
-        import pandas as pd
-
+    def to_series(self) -> pd.Series:
         return pd.Series(self._lengths, index=self._names)
 
     def __len__(self) -> int:
@@ -322,80 +352,27 @@ class Canvas:
         return (int(x * width), int((x + 1) * width))
 
     def invert(self, x: int) -> Iterator[GenomicRange]:
-        """Genomic intervals covered by tile ``x``."""
+        """Genomic intervals covered by tile ``x``.
+
+        Raises
+        ------
+        TileOutOfBounds
+            If ``x`` does not exist at this zoom. Tiles past the end of the
+            *genome* but inside the canvas are in range -- that padding is
+            what fills the trailing NaN bins of low-zoom tiles. Only positions
+            past the end of the *canvas* are rejected.
+        """
         if self.chromsizes is None:
             raise ValueError(
                 "canvas has no chromsizes, so tile positions cannot be "
                 "inverted to genomic intervals"
             )
+        if x < 0 or x >= self.n_tiles:
+            raise TileOutOfBounds(
+                f"tile position {x} is outside the {self.n_tiles} tiles at "
+                f"zoom {self.z}"
+            )
         return self.chromsizes.invert(self.tile_span(x))
-
-    def tile(self, x: int) -> TileGrid:
-        """The window covering tile ``x`` at this zoom.
-
-        Only needed by the SCATTER policy, which places data by absolute
-        position and so needs tile-relative bin indices. SEQUENTIAL callers
-        want :meth:`invert` instead.
-        """
-        return TileGrid(
-            origin=self.tile_span(x)[0],
-            binsize=self.binsize,
-            tile_size=self.tile_size,
-        )
-
-    def bin_of(self, abs_pos) -> int | np.ndarray:
-        """Canvas-global bin index containing ``abs_pos``.
-
-        Global rather than tile-relative -- subtract ``x * tile_size`` for the
-        latter, or use :meth:`TileGrid.bin_of`. Accepts arrays as well as
-        scalars.
-        """
-        idx = np.asarray(abs_pos) // self.binsize
-        return idx.astype(int) if idx.ndim else int(idx)
-
-    def tile_of(self, abs_pos) -> int:
-        """Which tile index contains ``abs_pos``."""
-        return int(np.asarray(abs_pos) // (self.binsize * self.tile_size))
-
-
-@dataclass(frozen=True, slots=True)
-class TileGrid:
-    """
-    One tile's window onto a :class:`Canvas`.
-
-    Bin ``i`` covers ``[origin + i * binsize, origin + (i + 1) * binsize)``.
-    Exactly ``tile_size`` bins. Construct via :meth:`Canvas.tile` rather than
-    directly, so the zoom-level arithmetic happens once.
-    """
-
-    # Absolute bp coordinate where this tile begins.
-    origin: int
-    binsize: float
-    tile_size: int
-
-    @property
-    def span(self) -> tuple[int, int]:
-        """Absolute ``[start, end)`` this tile covers."""
-        return (self.origin, self.origin + int(self.binsize * self.tile_size))
-
-    def bin_of(self, abs_pos):
-        """Index *within this tile* of the bin containing ``abs_pos``.
-
-        This is cooler's ``(genome_start1 - start1) // binsize``
-        (``cooler.py:340``) -- the whole of the SCATTER policy.
-
-        Accepts arrays as well as scalars, since cooler applies it to a column
-        of pixel positions at once.
-        """
-        idx = (np.asarray(abs_pos) - self.origin) // self.binsize
-        return idx.astype(int) if idx.ndim else int(idx)
-
-    def bin_bounds(self, i: int) -> tuple[int, int]:
-        """Absolute ``[start, end)`` covered by bin ``i``."""
-        return (
-            self.origin + int(i * self.binsize),
-            self.origin + int((i + 1) * self.binsize),
-        )
 
 
 def reconcile_sequential(
@@ -428,14 +405,14 @@ def reconcile_sequential(
         Deliberately an assertion rather than a clamp. multivec currently ends
         with ``np.concatenate(arrays)[: shape[0]]``, and that silent truncation
         is what hid its broken accumulator. Padding is not needed here: the
-        out-of-genome interval is yielded by
-        :meth:`Chromsizes.abs2genomic` and filled to the right length by the
-        per-interval fetcher, so the count comes out right on its own.
+        out-of-genome interval is yielded by :meth:`Chromsizes.invert` and
+        filled to the right length by the per-interval fetcher, so the count
+        comes out right on its own.
     threshold
         When to spend accumulated drift, as a fraction of a bin. ``1.0`` floors
         (truncates; worst-case shift ~1 bin), ``0.5`` rounds to nearest (~0.5
-        bin). See section 1.5b -- midpoint is a likely future default, but it
-        changes which bins are dropped and therefore what renders.
+        bin). Midpoint is a likely future default, but it changes which bins
+        are dropped and therefore what renders.
 
     Returns
     -------
@@ -471,13 +448,23 @@ def _bresenham_drop_indices(
 
     Split out from :func:`reconcile_sequential` so the policy can be tested and
     compared without fetching any data -- everything it needs is interval widths
-    and bin counts. That is how the floor-vs-midpoint threshold comparison in
-    section 1.5b was measured.
+    and bin counts.
 
     ``bp_walked`` is how far along the tile's span we have actually travelled;
     ``bp_claimed`` is how far the bins emitted so far claim to reach, since the
     client treats every bin as exactly ``binsize`` wide. Their difference is the
     accumulated drift.
+
+    At most one bin per chunk. A fetcher that rounds *outward* --
+    ``ceil(end / b) - floor(start / b)``, as multivec and cooler do -- can
+    over-supply by close to two bins in a chunk that starts mid-bin, which
+    raises the question of whether a one-bin budget can fall behind and blow
+    the ``expected_bins`` assertion. It cannot: only the tile's *first* chunk
+    has a nonzero chromosome-relative start, so every later chunk
+    over-supplies by strictly less than one bin, and a deferred drop is
+    always taken by the next chunk. Pinned by
+    ``test_reconcile_sequential_should_produce_expected_bins_for_outward_fetchers``,
+    which exercises both thresholds over randomized genomes.
     """
     drops = set()
     bp_walked = bp_claimed = 0.0
