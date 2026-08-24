@@ -117,7 +117,10 @@ def stable_importance(key: str) -> float:
     Uses the same digest the record's ``uid`` already comes from, so no new
     hashing is introduced.
     """
-    digest = hashlib.md5(key.encode("utf8")).hexdigest()
+    # `usedforsecurity=False` marks this as a bucketing hash rather than a
+    # security primitive, so it keeps working on a FIPS-enforcing build where
+    # md5 is otherwise refused.
+    digest = hashlib.md5(key.encode("utf8"), usedforsecurity=False).hexdigest()
     return int(digest[:8], 16) / 0x1_0000_0000
 
 
