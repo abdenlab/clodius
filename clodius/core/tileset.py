@@ -187,8 +187,13 @@ def quadtree_depth(total_length: int, tile_size_bp: int) -> int:
     if tile_size_bp <= 0:
         raise ValueError(f"tile_size_bp must be positive, got {tile_size_bp}")
 
-    min_tile_cover = math.ceil(total_length / tile_size_bp)
-    return int(math.ceil(math.log2(min_tile_cover)))
+    # Exact integer arithmetic, not ceil(log2(...)) over a float. The float
+    # form is wrong above roughly 2**48: quadtree_depth(2**49 + 1, 1) returned
+    # 49, and 2**49 is less than 2**49 + 1, so the top tile did not cover the
+    # space it is defined to cover. No genome reaches that, but the exact form
+    # costs nothing and removes the bound.
+    min_tile_cover = -(-total_length // tile_size_bp)
+    return (min_tile_cover - 1).bit_length()
 
 
 class Ladder(str, Enum):
@@ -396,8 +401,8 @@ class TilesetInfo(DatasetInfo):
         else:
             # An implicit ladder is a quadtree: max_width is tile_size * 2**max_zoom
             # and is genuinely invariant, so the tileset-level value stands.
-            if self.max_width is None:
-                raise ValueError("tileset declares no max_width")
+            # `resolution_for` above already rejected a missing max_width, so
+            # no guard is needed here.
             extent = self.max_width
 
         return Canvas(
