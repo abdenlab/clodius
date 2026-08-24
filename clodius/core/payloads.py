@@ -104,6 +104,13 @@ class DenseTileMinMaxPayload(TypedDict):
 
 _F16 = np.finfo("float16")
 
+# As Python floats. Comparing a Python float against the numpy scalars directly
+# casts the operand to float16, which emits `RuntimeWarning: overflow
+# encountered in cast` for any value beyond that range -- on the very path
+# whose job is to detect exactly those values.
+_F16_MIN = float(_F16.min)
+_F16_MAX = float(_F16.max)
+
 
 @dataclass(frozen=True, slots=True)
 class DenseTile:
@@ -188,8 +195,8 @@ class DenseTile:
 
         fits_f16 = (
             not bool(np.isnan(data).any())
-            and _F16.min < min_dense < _F16.max
-            and _F16.min < max_dense < _F16.max
+            and _F16_MIN < min_dense < _F16_MAX
+            and _F16_MIN < max_dense < _F16_MAX
         )
         dtype = "float16" if fits_f16 else "float32"
 
