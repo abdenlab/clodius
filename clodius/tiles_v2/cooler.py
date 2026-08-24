@@ -18,6 +18,7 @@ from clodius.core import (
     TileError,
     TileId,
     TileKind,
+    TileOutOfBounds,
     TilePolicy,
     TilesetInfo,
     reconcile_sequential_2d,
@@ -174,7 +175,36 @@ class CoolerTileset(BaseTileset):
         return self._info
 
     def tiles(self, ids):
-        return [(tid, self._tile(tid)) for tid in ids]
+        """Tiles for ``ids``, omitting any position the ladder does not hold.
+
+        Skipping rather than raising is the pre-existing contract for this
+        format specifically. ``clodius/tiles/cooler.py`` -- the direct
+        predecessor -- ``continue``s past a zoom above the ladder (twice, once
+        per ladder form) and filters out-of-bounds positions before generating
+        anything, so the caller gets a short list rather than an error. The
+        ``>=`` boundary fix in this PR exists precisely so the equality case
+        reaches that skip instead of falling through to an ``IndexError``, and
+        ``test/tiles/test_conformance.py`` asserts the resulting empty list.
+
+        It does not generalize across formats, so it is not lifted into
+        ``BaseTileset``: ``tiles/mrmatrix.py`` raises ``ValueError`` for the
+        same condition and ``tiles/bigwig.py`` has no bound check at all, which
+        is an accident rather than a contract. The other ``tiles_v2`` tilesets
+        keep propagating ``TileOutOfBounds`` until each one's own legacy
+        behavior is established.
+
+        Only ``TileOutOfBounds`` is swallowed. A malformed transform is a
+        ``TileError`` and still propagates, because a client asking for a
+        balancing column that does not exist has made a different kind of
+        mistake than one asking for a tile off the end of the genome.
+        """
+        out = []
+        for tid in ids:
+            try:
+                out.append((tid, self._tile(tid)))
+            except TileOutOfBounds:
+                continue
+        return out
 
     # --- internals ----------------------------------------------------------
 
