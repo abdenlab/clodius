@@ -24,9 +24,17 @@ they can be named, typed and checked.
 Most of the shapes below have no ``tiles_v2`` producer yet. They are declared
 anyway: :data:`PAYLOAD_TYPES` is the catalogue the conformance suite indexes,
 and a kind with no declared shape is what the suite cannot check.
-"""
 
-from __future__ import annotations
+.. warning::
+
+   Do not add ``from __future__ import annotations`` here. It stringifies every
+   annotation, and ``TypedDict`` does not re-evaluate them, so ``NotRequired``
+   becomes invisible at runtime: every shape below reported
+   ``__optional_keys__ == frozenset()`` and ``DenseTilePayload`` claimed
+   ``shape`` was required. Pydantic re-evaluates the strings and gets it right,
+   which is what hid the defect -- but anything dispatching on those attributes
+   directly demanded keys no producer emits.
+"""
 
 import base64
 import warnings
