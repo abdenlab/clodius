@@ -87,14 +87,22 @@ def build_bigbed(path, chromsizes=CANONICAL_CHROMSIZES, step=200, width=50):
 
     Entries are emitted in ``(chromosome order, start)`` order, which the
     writer requires.
+
+    Every chromosome gets at least one entry, matching :func:`build_bigwig`.
+    A contig shorter than ``width`` would otherwise contribute none, and
+    pybigtools writes a file it then cannot open -- which surfaces as
+    ``Error when opening`` with no indication that the genome was the cause.
     """
     pybigtools = pytest.importorskip("pybigtools")
     chroms = {name: int(length) for name, length in chromsizes}
     entries = []
     for name, length in chromsizes:
-        for start in range(0, int(length) - width, step):
+        length = int(length)
+        starts = list(range(0, length - width, step)) or [0]
+        for start in starts:
+            end = min(start + width, length)
             entries.append(
-                (name, start, start + width, f"{name}_{start}\t500\t+")
+                (name, start, end, f"{name}_{start}\t500\t+")
             )
     writer = pybigtools.open(str(path), "w")
     writer.write(chroms, iter(entries))
@@ -106,7 +114,7 @@ def build_mcool(
     chromsizes=CANONICAL_CHROMSIZES,
     resolutions=(1, 2, 4),
     seed=0,
-    weight=None,
+    weights=None,
     symmetric_upper=True,
 ):
     """A multi-resolution cooler with one group per entry in ``resolutions``.
@@ -122,10 +130,16 @@ def build_mcool(
     genome spans 12/6/3 tiles, tiles straddle chromosome boundaries, and the
     last tile at every zoom overhangs the genome end.
 
-    ``weight`` adds a constant ``weight`` bin column at every resolution, which
-    is what makes the balancing modifiers reachable. Cooler *multiplies* by the
-    two bins' weights, so a constant ``w`` scales every count by ``w**2`` --
-    verified, not assumed: the ICE convention is a multiplier, not a divisor.
+    ``weights`` maps bin-column name to a constant value, adding one column per
+    entry at every resolution, which is what makes the balancing modifiers
+    reachable. Cooler *multiplies* by the two bins' weights, so a constant ``w``
+    scales every count by ``w**2`` -- verified, not assumed: the ICE convention
+    is a multiplier, not a divisor.
+
+    It takes a mapping rather than a single value because one column named
+    ``weight`` is also the column ``resolve_balance`` falls back to by default,
+    so a cooler carrying only that column cannot distinguish honoring a named
+    request from ignoring it. Pass a second name to make the request observable.
 
     ``symmetric_upper=False`` writes ``storage-mode: square`` instead of the
     usual upper triangle, which is the attribute the cooler tileset reads to
@@ -152,8 +166,8 @@ def build_mcool(
             categories=[name for name, _ in chromsizes],
             ordered=True,
         )
-        if weight is not None:
-            bins["weight"] = float(weight)
+        for column, value in (weights or {}).items():
+            bins[column] = float(value)
 
         n = len(bins)
         b1 = rng.integers(0, n, size=min(4 * n, 400))
@@ -226,4 +240,43 @@ def build_mv5(
                         n_bins, n_rows
                     ),
                 )
+    return path
+
+
+DEFAULT_VARIANTS = [
+    ("c1", 100, "rs1"),
+    ("c1", 300, "rs2"),
+    ("c2", 50, "rs3"),
+    ("c2", 900, "rs4"),
+    ("c3", 10, "rs5"),
+]
+
+
+def build_vcf(
+    path, chromsizes=CANONICAL_CHROMSIZES, variants=DEFAULT_VARIANTS
+):
+    """A BGZF-compressed VCF with a sibling tabix index.
+
+    ``path`` should end in ``.gz``; the ``.tbi`` lands beside it. Positions in
+    ``variants`` are one-based, as they are in the file itself -- pysam reports
+    them back zero-based, so a record written at 100 is read at ``start`` 99.
+
+    The ``##contig`` headers are load-bearing. Without them pysam cannot resolve
+    a contig name to an index and ``fetch`` on a named region raises rather than
+    returning nothing.
+    """
+    pysam = pytest.importorskip("pysam")
+    plain = path.parent / f"{path.stem}.plain.vcf"
+    lines = ["##fileformat=VCFv4.2"]
+    lines += [
+        f"##contig=<ID={name},length={int(length)}>"
+        for name, length in chromsizes
+    ]
+    lines.append("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO")
+    lines += [
+        f"{chrom}\t{pos}\t{name}\tA\tG\t50\tPASS\t." for chrom, pos, name in variants
+    ]
+    plain.write_text("\n".join(lines) + "\n")
+    pysam.tabix_compress(str(plain), str(path), force=True)
+    pysam.tabix_index(str(path), preset="vcf", force=True)
     return path
