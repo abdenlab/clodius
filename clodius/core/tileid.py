@@ -167,6 +167,15 @@ class TileId:
             Recognized ``,key:value`` keys. ``None`` accepts any; an empty set
             rejects all.
         """
+        # A tileset that mis-declares its arity would otherwise reach the
+        # coordinate slice below and raise a bare `IndexError`, which is not a
+        # `TileError` and so escapes the server boundary as a 500 rather than a
+        # renderable per-tile error.
+        if ndim < 0:
+            raise MalformedTileId(
+                f"negative arity {ndim} declared for {tile_id!r}"
+            )
+
         head, _, opt_str = tile_id.partition(TILE_OPTIONS_CHAR)
         parsed_options = _parse_options(opt_str, tile_id, options)
 
