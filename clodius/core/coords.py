@@ -10,7 +10,7 @@ import bioframe
 import numpy as np
 import pandas as pd
 
-from clodius.core.errors import TileOutOfBounds
+from clodius.core.errors import TileOutOfBounds, TilesetUnavailable
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +81,10 @@ class Chromsizes:
 
     @classmethod
     def from_pairs(cls, pairs) -> Chromsizes:
+        # Materialized before the emptiness test: branching on the argument's
+        # truthiness makes an exhausted iterator raise where an empty list
+        # succeeds, and a 2-D array raise "truth value is ambiguous".
+        pairs = list(pairs)
         names, lengths = zip(*pairs) if pairs else ((), ())
         return cls(tuple(names), tuple(int(x) for x in lengths))
 
@@ -101,11 +105,31 @@ class Chromsizes:
 
     @classmethod
     def from_file(cls, path_or_handle) -> Chromsizes:
-        cs = bioframe.read_chromsizes(
-            path_or_handle, filter_chroms=False
-        ).to_dict()
+        try:
+            series = bioframe.read_chromsizes(
+                path_or_handle, filter_chroms=False
+            )
+        except Exception as exc:
+            # The reader raises pandas' own parser errors, which are not
+            # TileErrors and so escape the server boundary untranslated.
+            raise TilesetUnavailable(
+                f"could not read chromosome sizes: {exc}"
+            ) from exc
+
+        # A dict conversion would keep only the last length for a repeated
+        # name, silently shortening the genome. Total length defines the
+        # tiling axis, so that yields wrong tiles rather than an error.
+        duplicated = series.index[series.index.duplicated()].unique().tolist()
+        if duplicated:
+            raise TilesetUnavailable(
+                f"duplicate chromosome name(s) in chromosome sizes: "
+                f"{sorted(duplicated)}"
+            )
+
         key = cmp_to_key(_natcmp)
-        return cls.from_pairs(sorted(cs.items(), key=lambda x: key(x[0])))
+        return cls.from_pairs(
+            sorted(series.to_dict().items(), key=lambda x: key(x[0]))
+        )
 
     def to_pairs(self) -> list[list]:
         return [
@@ -125,8 +149,12 @@ class Chromsizes:
     def _boundaries(self):
         """``[0, len0, len0+len1, ..., total]``"""
         if self._bounds is None:
+            # asarray first: np.cumsum of an empty tuple returns float64,
+            # and concatenate's same-kind casting then refuses to narrow it,
+            # so an empty genome could not be inverted at all.
             self._bounds = np.concatenate(
-                [[0], np.cumsum(self._lengths)], dtype=int
+                [[0], np.cumsum(np.asarray(self._lengths, dtype=int))],
+                dtype=int,
             )
         return self._bounds
 
@@ -331,6 +359,22 @@ class Canvas:
     # Needed to invert tile positions back into genomic intervals.
     chromsizes: Chromsizes | None = None
 
+    def __post_init__(self):
+        # TilesetInfo validates these upstream, but Canvas is re-exported from
+        # clodius.core and can be constructed directly -- where a zero tile
+        # size or binsize surfaced as ZeroDivisionError from a property, and a
+        # negative extent constructed silently.
+        if self.binsize <= 0:
+            raise ValueError(f"binsize must be positive, got {self.binsize}")
+        if self.tile_size <= 0:
+            raise ValueError(
+                f"tile_size must be positive, got {self.tile_size}"
+            )
+        if self.max_width < 0:
+            raise ValueError(
+                f"max_width must be non-negative, got {self.max_width}"
+            )
+
     @property
     def span(self) -> tuple[int, int]:
         """Absolute ``[start, end)`` the whole canvas covers."""
@@ -428,7 +472,11 @@ def reconcile_sequential(
     for i, (values, _) in enumerate(chunks):
         if counts[i] == 0:
             continue
-        kept.append(values[:-1] if i in drops else values)
+        # asarray before slicing: dropping the only bin of a list-valued chunk
+        # otherwise leaves an empty Python list, which promotes the whole
+        # concatenation to float64.
+        arr = np.asarray(values)
+        kept.append(arr[:-1] if i in drops else arr)
 
     out = np.concatenate(kept) if kept else np.asarray([])
 
@@ -523,7 +571,10 @@ def reconcile_sequential_2d(
     np.ndarray
         The assembled 2D tile.
     """
-    if not blocks:
+    # `not blocks[0]` guards a non-empty outer sequence whose rows carry no
+    # blocks: the row-count comprehension indexes blocks[r][0] and would raise
+    # a bare IndexError.
+    if not blocks or not blocks[0]:
         return np.zeros((0, 0))
 
     row_counts = [blocks[r][0].shape[0] for r in range(len(blocks))]
@@ -541,12 +592,21 @@ def reconcile_sequential_2d(
     keep_rows = [r for r in range(len(blocks)) if row_counts[r]]
     keep_cols = [c for c in range(len(blocks[0])) if col_counts[c]]
 
-    grid = [
-        [_trim(blocks[r][c], r in row_drops, c in col_drops) for c in keep_cols]
-        for r in keep_rows
-    ]
-
-    out = np.block(grid) if grid else np.zeros((0, 0))
+    if not keep_rows or not keep_cols:
+        # One axis contributed nothing, so the tile is empty. Assembling the
+        # surviving axis anyway hands np.block a row of no arrays, which it
+        # rejects with an error naming its own internals.
+        out = np.zeros((0, 0))
+    else:
+        out = np.block(
+            [
+                [
+                    _trim(blocks[r][c], r in row_drops, c in col_drops)
+                    for c in keep_cols
+                ]
+                for r in keep_rows
+            ]
+        )
 
     if expected_shape is not None and out.shape != expected_shape:
         raise ValueError(
