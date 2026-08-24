@@ -22,7 +22,7 @@ from clodius.tiles_v2.bigwig import BigWigTileset
 from clodius.tiles_v2.cooler import CoolerTileset
 from clodius.tiles_v2.multivec import MultivecTileset
 
-TINY = [["c1", 100], ["c2", 200], ["c3", 50]]
+from ..harness.genome import CANONICAL_CHROMSIZES, MINIMAL_CHROMSIZES
 
 # Every tileset in the new layer, with the shape it declares. Structural
 # conformance is checked against these rather than against instances, because
@@ -40,12 +40,18 @@ TILESET_IDS = [cls.__name__ for cls, _, _ in TILESETS]
 
 @pytest.fixture
 def bed_tileset(tmp_path):
-    """A BedTileset over a three-record BED, needing no LFS fixture."""
+    """A BedTileset over a three-record BED, needing no LFS fixture.
+
+    Built on the canonical 3000 bp genome rather than the 350 bp one: at 350 bp
+    the ladder collapses to ``max_zoom == 0``, a single tile covering
+    everything, so any test that went on to request a tile would silently be
+    testing a degenerate geometry.
+    """
     from clodius.core.coords import Chromsizes
 
     path = tmp_path / "tiny.bed"
     path.write_text("c1\t10\t20\ta\nc2\t30\t40\tb\nc3\t0\t50\tc\n")
-    return BedTileset(path, Chromsizes.from_pairs(TINY))
+    return BedTileset(path, Chromsizes.from_pairs(CANONICAL_CHROMSIZES))
 
 
 @pytest.mark.parametrize(
@@ -122,7 +128,7 @@ def test_quadtree_depth_should_match_the_legacy_utils_call_site(tile_size):
         It should agree, since utils takes the tile width directly.
     """
     # Arrange
-    lengths = [p[1] for p in TINY]
+    lengths = [p[1] for p in MINIMAL_CHROMSIZES]
     total = sum(lengths)
 
     # Act
@@ -143,7 +149,7 @@ def test_quadtree_depth_should_match_the_legacy_bigwig_call_site():
         It should agree, with bigwig's hardcoded TILE_SIZE supplied.
     """
     # Arrange
-    lengths = [p[1] for p in TINY]
+    lengths = [p[1] for p in MINIMAL_CHROMSIZES]
 
     # Act
     result = quadtree_depth(sum(lengths), BIGWIG_TILE_SIZE)
@@ -164,7 +170,7 @@ def test_quadtree_depth_should_match_the_legacy_cooler_call_site(binsize):
         It should agree, with cooler's ``256 * binsize`` tile width supplied.
     """
     # Arrange
-    lengths = [p[1] for p in TINY]
+    lengths = [p[1] for p in MINIMAL_CHROMSIZES]
 
     # Act
     result = quadtree_depth(sum(lengths), 256 * binsize)
