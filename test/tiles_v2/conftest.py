@@ -5,7 +5,7 @@ test needing an unknown contig or a one-resolution ladder passes it in instead
 of asking for a second fixture.
 
 Scope follows build cost. bed, bigWig, bigBed and multivec all build in 1-3 ms,
-so they are function-scoped over ``tmp_path``. A cooler costs ~117 ms, which is
+so they are function-scoped over ``tmp_path``. A cooler costs ~350 ms, which is
 why ``shared_mcool`` is session-scoped -- note that mixing it with a
 function-scoped fixture in one test is a ``ScopeMismatch`` error, not a
 warning, so a test needing a *modified* cooler must build its own.
@@ -81,6 +81,21 @@ def make_mv5(tmp_path):
 
 @pytest.fixture(scope="session")
 def shared_mcool(tmp_path_factory):
-    """One multi-resolution cooler for the whole session (~117 ms to build)."""
+    """One multi-resolution cooler for the whole session (~350 ms to build)."""
     path = tmp_path_factory.mktemp("cooler") / "tiny.mcool"
     return builders.build_mcool(path)
+
+
+@pytest.fixture
+def make_mcool(tmp_path):
+    """``make_mcool(chromsizes=..., resolutions=..., weights=...) -> Path``.
+
+    Session-scoped ``shared_mcool`` covers the default fixture; this is for the
+    tests that need a *different* cooler -- a balancing column, a single-entry
+    ladder -- and so cannot share one.
+    """
+
+    def _make(name="tiny.mcool", **kwargs):
+        return builders.build_mcool(tmp_path / name, **kwargs)
+
+    return _make

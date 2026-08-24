@@ -104,14 +104,27 @@ def build_bigbed(path, chromsizes=CANONICAL_CHROMSIZES, step=200, width=50):
 def build_mcool(
     path,
     chromsizes=CANONICAL_CHROMSIZES,
-    resolutions=(1000, 2000, 4000),
+    resolutions=(1, 2, 4),
     seed=0,
+    weight=None,
 ):
     """A multi-resolution cooler with one group per entry in ``resolutions``.
 
     The first ``create_cooler`` call opens the file with ``mode="w"`` and every
     later one appends with ``mode="a"`` -- the default would truncate what the
     previous call just wrote.
+
+    The default resolutions are deliberately tiny relative to the genome. A
+    cooler tile is 256 bins wide, so a 1 kb binsize on a 3 kb genome puts the
+    whole genome inside a single bin of a single tile -- one real value and
+    65,535 padding cells, which exercises no geometry at all. At 1/2/4 the same
+    genome spans 12/6/3 tiles, tiles straddle chromosome boundaries, and the
+    last tile at every zoom overhangs the genome end.
+
+    ``weight`` adds a constant ``weight`` bin column at every resolution, which
+    is what makes the balancing modifiers reachable. Cooler *multiplies* by the
+    two bins' weights, so a constant ``w`` scales every count by ``w**2`` --
+    verified, not assumed: the ICE convention is a multiplier, not a divisor.
     """
     cooler = pytest.importorskip("cooler")
     pd = pytest.importorskip("pandas")
@@ -133,6 +146,8 @@ def build_mcool(
             categories=[name for name, _ in chromsizes],
             ordered=True,
         )
+        if weight is not None:
+            bins["weight"] = float(weight)
 
         n = len(bins)
         b1 = rng.integers(0, n, size=min(4 * n, 400))
