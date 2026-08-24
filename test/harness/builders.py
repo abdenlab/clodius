@@ -107,6 +107,7 @@ def build_mcool(
     resolutions=(1, 2, 4),
     seed=0,
     weight=None,
+    symmetric_upper=True,
 ):
     """A multi-resolution cooler with one group per entry in ``resolutions``.
 
@@ -125,6 +126,11 @@ def build_mcool(
     is what makes the balancing modifiers reachable. Cooler *multiplies* by the
     two bins' weights, so a constant ``w`` scales every count by ``w**2`` --
     verified, not assumed: the ICE convention is a multiplier, not a divisor.
+
+    ``symmetric_upper=False`` writes ``storage-mode: square`` instead of the
+    usual upper triangle, which is the attribute the cooler tileset reads to
+    decide whether the client must mirror across the diagonal. Cooler warns
+    that it is disabling ``triucheck``; that is expected, not a misuse.
     """
     cooler = pytest.importorskip("cooler")
     pd = pytest.importorskip("pandas")
@@ -168,6 +174,7 @@ def build_mcool(
             pixels,
             mode="w" if i == 0 else "a",
             ordered=True,
+            symmetric_upper=symmetric_upper,
         )
     return path
 
