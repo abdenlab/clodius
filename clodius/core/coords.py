@@ -337,8 +337,8 @@ class Canvas:
     A zoom level is the natural unit of a grid: it defines a complete partition
     of ``[0, max_width)`` into bins of exactly ``binsize``, ignoring chromosome
     boundaries. A tile is a window of ``tile_size`` consecutive bins cut from
-    it, which is why :meth:`tile` takes only ``x`` -- the lattice is already
-    fixed by the zoom.
+    it, which is why :meth:`tile_span` and :meth:`invert` take only ``x`` -- the
+    lattice is already fixed by the zoom.
 
     Obtained from :meth:`TilesetInfo.canvas`, so the resolution-ladder logic
     stays in one place and callers never recompute ``max_width / 2**z``.
