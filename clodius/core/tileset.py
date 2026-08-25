@@ -72,9 +72,19 @@ class Tileset(Dataset, Protocol):
         ``tile_id.raw`` as the response key, making the round-trip requirement
         structural instead of per-module bookkeeping.
 
-        Implementations MUST return one entry per requested id, or raise. They
-        must never drop siblings -- that is the current bug in ``vcf.py:195``,
-        ``bam.py:628`` and ``bam_pysam.py:359``.
+        Implementations MUST NOT let one id's failure discard another's --
+        that is the current bug in ``vcf.py:195``, ``bam.py:628`` and
+        ``bam_pysam.py:359``, all of which ``return`` from inside the per-tile
+        loop.
+
+        Returning one entry per requested id is the default, but it is not
+        universal: where a format's predecessor established that an
+        out-of-range id is *skipped*, the rewrite preserves that and the result
+        is shorter than the request. ``clodius/tiles/cooler.py`` did, so
+        :class:`~clodius.tiles_v2.cooler.CoolerTileset` does; ``mrmatrix.py``
+        raises and ``bigwig.py`` has no bound check at all, so no general rule
+        is imposed here. A caller must key on the returned ids rather than
+        zipping against the request.
         """
         ...
 
