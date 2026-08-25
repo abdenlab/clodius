@@ -15,15 +15,17 @@ Types are added here as fixtures become available. Missing fixtures skip rather
 than fail, since ``data/`` lives in git LFS.
 """
 
-import base64
 import os.path as op
+import warnings
 
-import numpy as np
 import pytest
 
 import clodius.tiles.bigwig as bigwig
 import clodius.tiles.cooler as cooler
 import clodius.tiles.fasta as fasta
+
+from ..harness.lfs import requires_lfs, unavailable
+from ..harness.wire import decode, n_bins, square
 
 BIGWIG = op.join(
     "data", "wgEncodeCaltechRnaSeqHuvecR1x75dTh1014IlnaPlusSignalRep2.bigWig"
@@ -32,54 +34,7 @@ COOLER = op.join("data", "Dixon2012-J1-NcoI-R1-filtered.100kb.multires.cool")
 FASTA = op.join("data", "GCA_000350705.1_Esch_coli_KTE11_V1_genomic.short.fna")
 FASTA_FAI = FASTA + ".fai"
 
-COOLER_BINS_PER_TILE = 256
-
-# An un-smudged LFS file is a short text stub, not the payload it stands for.
-LFS_POINTER_MAGIC = b"version https://git-lfs"
-LFS_POINTER_MAX_BYTES = 1024
-
 ALL_FIXTURES = (BIGWIG, COOLER, FASTA, FASTA_FAI)
-
-
-def is_lfs_pointer(path):
-    """Whether ``path`` is an un-smudged git-LFS pointer rather than content.
-
-    ``op.exists`` is not enough: the pointer exists, so a bare existence check
-    lets the suite run against a 130-byte text stub. bigwig then raises
-    ``BBIReadError``, cooler raises ``OSError``, and fasta spins forever in
-    ``fetch_sequence`` when the ``.fna`` is a pointer and the ``.fai`` is real.
-    """
-    try:
-        if op.getsize(path) > LFS_POINTER_MAX_BYTES:
-            return False
-        with open(path, "rb") as f:
-            return f.read(len(LFS_POINTER_MAGIC)) == LFS_POINTER_MAGIC
-    except OSError:
-        return False
-
-
-def requires(*paths):
-    missing = [
-        p for p in paths if not op.exists(p) or is_lfs_pointer(p)
-    ]
-    return pytest.mark.skipif(
-        bool(missing),
-        reason=f"missing or un-smudged LFS fixture(s): {missing}",
-    )
-
-
-def decode(payload):
-    """Decode a dense payload into a flat array."""
-    assert "error" not in payload, payload.get("error")
-    return np.frombuffer(
-        base64.b64decode(payload["dense"]), dtype=payload["dtype"]
-    )
-
-
-def n_bins(payload):
-    """Bins in a dense tile. ``size`` is values-per-bin (2 for minMax, 4 for
-    whisker); it is absent on payloads that hand-roll their formatting."""
-    return len(decode(payload)) // payload.get("size", 1)
 
 
 # --- fixture availability ---------------------------------------------------
@@ -88,7 +43,7 @@ def n_bins(payload):
 # in which zero assertions ran.
 
 
-def test_requires_should_report_which_fixtures_are_unavailable():
+def test_unavailable_should_name_every_missing_or_unsmudged_fixture():
     """Test that the suite says out loud when it is running on stubs.
 
     Given:
@@ -97,20 +52,25 @@ def test_requires_should_report_which_fixtures_are_unavailable():
         Each is checked for content.
     Then:
         It should pass, emitting a warning naming any that are absent or
-        un-smudged so a green run is not mistaken for a covered one.
+        un-smudged so a green run is not mistaken for a covered one, and it
+        should name only fixtures this module actually declares.
+
+        Passing loudly is the point. Skipping here would put this test in the
+        same skip count as the 26 below it, which is exactly the signal it
+        exists to distinguish -- and the assertion after a ``pytest.skip`` is
+        unreachable, so the previous form could not fail either way.
     """
     # Act
-    unavailable = [
-        p for p in ALL_FIXTURES if not op.exists(p) or is_lfs_pointer(p)
-    ]
+    missing = unavailable(*ALL_FIXTURES)
 
     # Assert
-    if unavailable:
-        pytest.skip(
+    if missing:
+        warnings.warn(
             "LFS payloads not materialized, so every check below is skipped: "
-            f"{unavailable}. Run `git lfs pull` to cover them."
+            f"{missing}. Run `git lfs pull` to cover them.",
+            stacklevel=1,
         )
-    assert not unavailable
+    assert set(missing) <= set(ALL_FIXTURES)
 
 
 # --- bigwig -----------------------------------------------------------------
@@ -119,7 +79,7 @@ def test_requires_should_report_which_fixtures_are_unavailable():
 # resynchronize. Tiles deep inside one chromosome never exercise it.
 
 
-@requires(BIGWIG)
+@requires_lfs(BIGWIG)
 @pytest.mark.parametrize(
     "z,x",
     [
@@ -156,7 +116,7 @@ def test_tiles_should_return_the_advertised_bin_count_for_bigwig(z, x):
     assert n_bins(payload) == tile_size
 
 
-@requires(BIGWIG)
+@requires_lfs(BIGWIG)
 @pytest.mark.parametrize(
     "mode,values_per_bin",
     [
@@ -194,13 +154,18 @@ def test_tiles_should_keep_the_bin_count_when_the_range_mode_changes(
     assert n_bins(payload) == tile_size
 
 
-@requires(BIGWIG)
+@requires_lfs(BIGWIG)
 def test_tiles_should_return_a_uniform_length_at_every_zoom_level():
     """Test bin-count stability across the whole resolution ladder.
 
     Given:
-        A bigwig, swept at every zoom level at the boundary-crossing edge of
-        the genome.
+        A bigwig, swept at the first, second and last position of every zoom
+        up to 13. The cap is deliberate: this reads a real multi-gigabase
+        bigWig from ``data/``, and the zooms past 13 hold tens of thousands of
+        tiles each. Positions 0 and 1 sit at the start of the genome where the
+        first contig boundary falls, and ``2**z - 1`` is the tile that
+        overhangs the end -- the three places the reconciler has to drop or
+        pad bins.
     When:
         Tiles are generated.
     Then:
@@ -224,7 +189,7 @@ def test_tiles_should_return_a_uniform_length_at_every_zoom_level():
 # --- cooler -----------------------------------------------------------------
 
 
-@requires(COOLER)
+@requires_lfs(COOLER)
 @pytest.mark.parametrize("z,x,y", [(0, 0, 0), (1, 0, 0), (1, 1, 1), (2, 1, 2)])
 def test_tiles_should_return_a_square_full_tile_for_cooler(z, x, y):
     """Test that a cooler tile fills its fixed buffer.
@@ -234,19 +199,27 @@ def test_tiles_should_return_a_square_full_tile_for_cooler(z, x, y):
     When:
         The tile is generated.
     Then:
-        It should carry exactly 256x256 values. cooler rasterizes by absolute
-        position into a fixed buffer, so length is correct by construction --
-        collisions and gaps are its failure mode, not length. Pinned so that
-        stays true.
+        It should be a square whose side is the ``bins_per_dimension`` the
+        info advertises. cooler rasterizes by absolute position into a fixed
+        buffer, so length is correct by construction -- collisions and gaps
+        are its failure mode, not length. Pinned so that stays true.
+
+        The side is read off the info rather than written down here. Asserting
+        against a local ``256`` compares the payload with a constant this test
+        chose, not with the number the tileset told the client to expect --
+        which is the only thing that makes a wrong length detectable.
     """
+    # Arrange
+    side = cooler.tileset_info(COOLER)["bins_per_dimension"]
+
     # Act
     (_, payload) = cooler.tiles(COOLER, [f"a.{z}.{x}.{y}"])[0]
 
     # Assert
-    assert len(decode(payload)) == COOLER_BINS_PER_TILE**2
+    assert square(payload).shape == (side, side)
 
 
-@requires(COOLER)
+@requires_lfs(COOLER)
 def test_tiles_should_skip_the_tile_when_the_zoom_level_is_past_the_ladder():
     """Test the guard at the top of the resolution ladder.
 
@@ -272,7 +245,7 @@ def test_tiles_should_skip_the_tile_when_the_zoom_level_is_past_the_ladder():
 # --- fasta ------------------------------------------------------------------
 
 
-@requires(FASTA, FASTA_FAI)
+@requires_lfs(FASTA, FASTA_FAI)
 def test_sequence_tiles_should_be_full_away_from_the_genome_end():
     """Test that an interior sequence tile is a full tile.
 
@@ -295,7 +268,7 @@ def test_sequence_tiles_should_be_full_away_from_the_genome_end():
     assert len(payload["sequence"]) == info["tile_size"]
 
 
-@requires(FASTA, FASTA_FAI)
+@requires_lfs(FASTA, FASTA_FAI)
 def test_sequence_tiles_should_be_short_at_the_genome_end():
     """Test the current end-of-genome behavior, rather than endorsing it.
 
@@ -319,4 +292,6 @@ def test_sequence_tiles_should_be_short_at_the_genome_end():
     )[0]
 
     # Assert
-    assert len(payload["sequence"]) < info["tile_size"]
+    expected = info["max_pos"][0] - last_x * info["tile_size"]
+    assert len(payload["sequence"]) == expected
+    assert 0 < expected < info["tile_size"]

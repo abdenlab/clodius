@@ -8,9 +8,10 @@ literal bytes ``b've'`` (the start of ``version https://git-lfs``), and fasta
 spins forever in ``fetch_sequence`` when the ``.fna`` is a pointer and its
 ``.fai`` sibling is real.
 
-This module is the single place that knows the difference. It was extracted
-from ``test/tiles/test_conformance.py``, which was the only file guarding its
-``data/`` reads while its neighbours went unguarded.
+This module is the single place that knows the difference: every guarded read
+of ``data/`` goes through :func:`requires_lfs`, including
+``test/tiles/test_conformance.py``, which was the only file guarding its reads
+at all and did so with a private copy of this logic.
 """
 
 import os.path as op
@@ -36,11 +37,6 @@ def is_lfs_pointer(path):
 def unavailable(*paths):
     """The subset of ``paths`` that is missing or is an un-smudged pointer."""
     return [p for p in paths if not op.exists(p) or is_lfs_pointer(p)]
-
-
-def lfs_available(*paths):
-    """Whether every path in ``paths`` holds real content."""
-    return not unavailable(*paths)
 
 
 def requires_lfs(*paths):
