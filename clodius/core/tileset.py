@@ -7,7 +7,7 @@ from typing import ClassVar, Protocol, Sequence, runtime_checkable
 
 from clodius.core.coords import Canvas, Chromsizes
 from clodius.core.payloads import TileKind, RegionRow
-from clodius.core.policies import TilePolicy
+from clodius.core.policies import DensityPolicy, GridPolicy, TilePolicy
 from clodius.core.tileid import ModifierSpec, TileId
 from clodius.core.errors import TileOutOfBounds
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -135,6 +135,52 @@ class ProvidesRegions(Protocol):
     def regions(
         self, offset: int, limit: int
     ) -> tuple[list[RegionRow], bool]: ...
+
+
+# --- how a tileset bounds one tile ------------------------------------------
+# Two protocols rather than two more members of :class:`Tileset`, because the
+# choice is mutually exclusive by kind: a dense type has a grid to resample and
+# no record count to cap, a record type has the reverse. Folding both into
+# ``Tileset`` would make every implementation declare a policy for something it
+# does not do, and ``isinstance`` -- which is how conformance is checked here --
+# would then accept a tileset that had answered the question meaninglessly.
+#
+# Neither is dispatched on today. Both are declared so the alternatives have a
+# seam to land on rather than a keyword argument threaded through five modules,
+# and so a reader can tell which strategy a type follows without reading its
+# ``tiles()``. The enums carry the survey of what ``clodius/tiles/`` actually
+# does; see :class:`~clodius.core.policies.DensityPolicy` in particular, whose
+# three members describe three genuinely different existing implementations.
+
+
+@runtime_checkable
+class ResamplesGrid(Protocol):
+    """A tileset that lays chromosome-segmented data onto a uniform lattice.
+
+    Declared by the dense types: bigwig, multivec, cooler. All three are
+    ``SEQUENTIAL`` today and call a reconciler directly --
+    :func:`~clodius.core.coords.reconcile_sequential` for the two vector types,
+    :func:`~clodius.core.coords.reconcile_sequential_2d` for cooler -- so the
+    attribute records the choice rather than selecting it.
+    """
+
+    grid_policy: ClassVar[GridPolicy]
+
+
+@runtime_checkable
+class LimitsDensity(Protocol):
+    """A tileset that bounds how many records one tile may return.
+
+    Declared by the record types: bed, bigbed. Both are ``SUBSAMPLED``, capped
+    at ``policy.max_entries_per_tile`` -- bigbed through
+    :func:`~clodius.core.policies.take_most_important`, bed through a polars
+    ``top_k`` over a precomputed digest column, which keeps the thinning inside
+    the frame rather than materializing every overlapping record first.
+    ``STRATIFIED`` belongs to the beddb family and ``REFUSED`` to bam and vcf,
+    none of which has a ``tiles_v2`` tileset yet.
+    """
+
+    density_policy: ClassVar[DensityPolicy]
 
 
 class BaseTileset:
