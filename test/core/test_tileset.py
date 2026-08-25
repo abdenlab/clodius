@@ -7,7 +7,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
-from clodius.core.coords import Chromsizes
+from clodius.core.coords import Chromsizes, GenomicRange
 from clodius.core.errors import (
     MalformedTileId,
     TileOutOfBounds,
@@ -15,15 +15,17 @@ from clodius.core.errors import (
     UnsupportedOption,
 )
 from clodius.core.payloads import TileKind
-from clodius.core.policies import DEFAULT_POLICY
+from clodius.core.policies import DEFAULT_POLICY, DensityPolicy, GridPolicy
 from clodius.core.tileid import ModifierSpec
 from clodius.core.tileset import (
     BaseTileset,
     Dataset,
     DatasetInfo,
     Ladder,
+    LimitsDensity,
     ProvidesChromsizes,
     ProvidesRegions,
+    ResamplesGrid,
     Tileset,
     TilesetInfo,
     quadtree_depth,
@@ -43,15 +45,31 @@ from ..harness.genome import CANONICAL_CHROMSIZES, MINIMAL_CHROMSIZES
 # Every tileset in the new layer, with the shape it declares. Structural
 # conformance is checked against these rather than against instances, because
 # four of the five need a real file to construct.
+# ``modifiers`` is ``None`` where a tileset declares no modifier slot at all,
+# which is a different statement from declaring an empty one: ``TileId.parse``
+# rejects any modifier against ``None`` and validates against a spec.
 TILESETS = [
-    (BedTileset, "bedlike", 1),
-    (BigBedTileset, "bedlike", 1),
-    (BigWigTileset, "vector", 1),
-    (CoolerTileset, "matrix", 2),
-    (MultivecTileset, "multivec", 1),
+    (BedTileset, "bedlike", 1, TileKind.BEDLIKE, frozenset(), False),
+    (BigBedTileset, "bedlike", 1, TileKind.BEDLIKE, frozenset({"cos", "max"}), True),
+    (BigWigTileset, "vector", 1, TileKind.DENSE, frozenset({"cos"}), True),
+    (CoolerTileset, "matrix", 2, TileKind.DENSE, frozenset(), True),
+    (MultivecTileset, "multivec", 1, TileKind.DENSE, frozenset(), False),
 ]
 
-TILESET_IDS = [cls.__name__ for cls, _, _ in TILESETS]
+TILESET_IDS = [row[0].__name__ for row in TILESETS]
+
+# How each tileset bounds a single tile. Exactly one of the two applies: a
+# dense type resamples a ragged grid onto the lattice and has no record count
+# to cap, a record type caps a count and has no grid. Pinned as a table so that
+# adding a tileset which declares both, or neither, fails here rather than in
+# whichever server later dispatches on it.
+BOUNDING_POLICIES = [
+    (BedTileset, "density_policy", DensityPolicy.SUBSAMPLED),
+    (BigBedTileset, "density_policy", DensityPolicy.SUBSAMPLED),
+    (BigWigTileset, "grid_policy", GridPolicy.SEQUENTIAL),
+    (CoolerTileset, "grid_policy", GridPolicy.SEQUENTIAL),
+    (MultivecTileset, "grid_policy", GridPolicy.SEQUENTIAL),
+]
 
 
 @pytest.fixture
@@ -63,7 +81,6 @@ def bed_tileset(tmp_path):
     everything, so any test that went on to request a tile would silently be
     testing a degenerate geometry.
     """
-    from clodius.core.coords import Chromsizes
 
     path = tmp_path / "tiny.bed"
     path.write_text("c1\t10\t20\ta\nc2\t30\t40\tb\nc3\t0\t50\tc\n")
@@ -195,79 +212,102 @@ def test_quadtree_depth_should_match_the_legacy_cooler_call_site(binsize):
     assert result == quadtree_depth_cooler(lengths, binsize)
 
 
-class TestBaseTileset:
-    """Behavior the convenience base supplies to every tileset."""
-
-    def test_parse_tile_id_should_reject_options_when_none_are_declared(self):
-        """Test that an empty option set rejects rather than accepts.
-
-        Given:
-            A tileset declaring an empty frozenset of recognized options.
-        When:
-            A tile id carrying an option is parsed.
-        Then:
-            It should raise UnsupportedOption, since an empty set means
-            options are rejected -- not that any option is allowed.
-        """
-
-        # Arrange
-        class NoOptions(BaseTileset):
-            ndim = 1
-            options = frozenset()
-
-        # Act & assert
-        with pytest.raises(UnsupportedOption, match="bogus"):
-            NoOptions().parse_tile_id("uid.3.4,bogus:1")
-
-    def test_parse_tile_id_should_accept_a_declared_option(self):
-        """Test that a recognized option parses through.
-
-        Given:
-            A tileset declaring one recognized option key.
-        When:
-            A tile id carrying that option is parsed.
-        Then:
-            It should expose the option's value.
-        """
-
-        # Arrange
-        class OneOption(BaseTileset):
-            ndim = 1
-            options = frozenset({"cos"})
-
-        # Act
-        tid = OneOption().parse_tile_id("uid.3.4,cos:abc")
-
-        # Assert
-        assert tid.option("cos") == "abc"
-
-
 @pytest.mark.parametrize(
-    "cls,datatype,ndim", TILESETS, ids=TILESET_IDS
+    "cls,datatype", [(r[0], r[1]) for r in TILESETS], ids=TILESET_IDS
 )
-def test_datatype_should_be_declared_by_every_tileset(cls, datatype, ndim):
-    """Test that each tileset declares the capability surface it promises.
+def test_datatype_should_be_declared_by_every_tileset(cls, datatype):
+    """Test the datatype each tileset declares.
 
     Given:
         A tileset class in the new layer.
     When:
-        Its declared class attributes are read.
+        Its ``datatype`` is read.
     Then:
-        It should carry the datatype, arity, tile kind, modifier spec and
-        option set the Tileset protocol requires.
+        It should be the string the wire uses for that format.
     """
     # Act & assert
     assert cls.datatype == datatype
-    assert cls.ndim == ndim
-    assert cls.tile_kind is not None
-    assert isinstance(cls.options, frozenset)
-    assert hasattr(cls, "modifiers")
 
 
 @pytest.mark.parametrize(
-    "cls,datatype,ndim", TILESETS, ids=TILESET_IDS
+    "cls,ndim", [(r[0], r[2]) for r in TILESETS], ids=TILESET_IDS
 )
-def test_info_should_take_no_arguments_on_every_tileset(cls, datatype, ndim):
+def test_ndim_should_be_declared_by_every_tileset(cls, ndim):
+    """Test the coordinate arity each tileset declares.
+
+    Given:
+        A tileset class in the new layer.
+    When:
+        Its ``ndim`` is read.
+    Then:
+        It should be the number of positional slots its tile ids carry.
+    """
+    # Act & assert
+    assert cls.ndim == ndim
+
+
+@pytest.mark.parametrize(
+    "cls,tile_kind", [(r[0], r[3]) for r in TILESETS], ids=TILESET_IDS
+)
+def test_tile_kind_should_be_declared_by_every_tileset(cls, tile_kind):
+    """Test the payload kind each tileset declares.
+
+    Given:
+        A tileset class in the new layer.
+    When:
+        Its ``tile_kind`` is read.
+    Then:
+        It should be the kind whose payload shape it emits. Asserting only
+        that it is not ``None`` passes for every kind, including the wrong
+        one -- and the kind is what selects the shape a client decodes.
+    """
+    # Act & assert
+    assert cls.tile_kind is tile_kind
+
+
+@pytest.mark.parametrize(
+    "cls,options", [(r[0], r[4]) for r in TILESETS], ids=TILESET_IDS
+)
+def test_options_should_be_declared_by_every_tileset(cls, options):
+    """Test the recognized option keys each tileset declares.
+
+    Given:
+        A tileset class in the new layer.
+    When:
+        Its ``options`` set is read.
+    Then:
+        It should hold exactly the ``,key:value`` keys that tileset parses.
+        An ``isinstance`` check passes for an empty set on a tileset that
+        recognizes two.
+    """
+    # Act & assert
+    assert cls.options == options
+
+
+@pytest.mark.parametrize(
+    "cls,declares_modifiers", [(r[0], r[5]) for r in TILESETS], ids=TILESET_IDS
+)
+def test_modifiers_should_be_declared_by_every_tileset(cls, declares_modifiers):
+    """Test whether each tileset declares a modifier slot.
+
+    Given:
+        A tileset class in the new layer.
+    When:
+        Its ``modifiers`` attribute is read.
+    Then:
+        It should be a spec where the format has a modifier slot and ``None``
+        where it has none. ``hasattr`` cannot fail here: ``BaseTileset``
+        supplies ``modifiers = None`` as a class default, so every subclass
+        has the attribute whatever it declares.
+    """
+    # Act & assert
+    assert (cls.modifiers is not None) is declares_modifiers
+
+
+@pytest.mark.parametrize(
+    "cls", [cls for cls, *_ in TILESETS], ids=TILESET_IDS
+)
+def test_info_should_take_no_arguments_on_every_tileset(cls):
     """Test the ``info()`` signature the protocol declares.
 
     Given:
@@ -276,6 +316,9 @@ def test_info_should_take_no_arguments_on_every_tileset(cls, datatype, ndim):
         Its ``info`` signature is inspected.
     Then:
         It should take only ``self``, since a server calls it bare.
+        ``runtime_checkable`` checks member presence and not signatures -- see
+        ``test___instancecheck___should_ignore_method_signatures`` -- which is
+        why this structural guard earns its place.
     """
     # Act
     params = list(inspect.signature(cls.info).parameters)
@@ -285,11 +328,9 @@ def test_info_should_take_no_arguments_on_every_tileset(cls, datatype, ndim):
 
 
 @pytest.mark.parametrize(
-    "cls,datatype,ndim", TILESETS, ids=TILESET_IDS
+    "cls", [cls for cls, *_ in TILESETS], ids=TILESET_IDS
 )
-def test_tiles_should_take_a_batch_of_ids_on_every_tileset(
-    cls, datatype, ndim
-):
+def test_tiles_should_take_a_batch_of_ids_on_every_tileset(cls):
     """Test the ``tiles()`` signature the protocol declares.
 
     Given:
@@ -297,23 +338,25 @@ def test_tiles_should_take_a_batch_of_ids_on_every_tileset(
     When:
         Its ``tiles`` signature is inspected.
     Then:
-        It should take exactly one argument beyond ``self``, so scan-oriented
-        backends can coalesce a whole batch.
+        It should take exactly one argument beyond ``self``, and that argument
+        should be named ``ids`` -- the plural is the contract a batch-coalescing
+        caller depends on, and arity alone does not distinguish it from a
+        method taking one id.
     """
     # Act
     params = list(inspect.signature(cls.tiles).parameters)
 
     # Assert
-    assert len(params) == 2 and params[0] == "self"
+    assert params == ["self", "ids"]
 
 
-def test___init___should_produce_an_object_satisfying_the_protocols(
+def test___instancecheck___should_accept_a_conforming_tileset(
     bed_tileset,
 ):
     """Test structural conformance against the declared protocols.
 
     Given:
-        A constructed tileset.
+        A tileset the fixture has already constructed.
     When:
         It is checked against Tileset and the capability protocols it claims.
     Then:
@@ -324,21 +367,6 @@ def test___init___should_produce_an_object_satisfying_the_protocols(
     assert isinstance(bed_tileset, Tileset)
     assert isinstance(bed_tileset, ProvidesChromsizes)
     assert isinstance(bed_tileset, ProvidesRegions)
-
-
-def test___enter___should_bind_the_tileset_itself(bed_tileset):
-    """Test that a tileset is usable as a context manager.
-
-    Given:
-        A constructed tileset.
-    When:
-        It is used in a ``with`` block.
-    Then:
-        It should yield itself and close on exit without raising.
-    """
-    # Act & assert
-    with bed_tileset as ts:
-        assert ts is bed_tileset
 
 
 PROPERTY = settings(max_examples=200)
@@ -981,6 +1009,7 @@ class TestTilesetInfo:
         with pytest.raises(ValueError, match="needs both max_width and"):
             info.resolution_for(0)
 
+    @pytest.mark.pinned
     def test_resolution_for_should_be_unbounded_without_a_max_zoom(self):
         """Test an implicit ladder that declares no depth.
 
@@ -989,10 +1018,13 @@ class TestTilesetInfo:
         When:
             An absurdly deep zoom is requested.
         Then:
-            It should return a resolution rather than raising, the upper
-            bound applying only when a max zoom was declared. Pinned as
-            observed: a client can walk arbitrarily far past any sensible
-            ladder here.
+            It should return ``max_width / 2**50 / tile_size`` rather than
+            raising -- 3.55e-15 bp per bin, which is the point: the upper
+            bound applies only when a max zoom was declared, so a client can
+            walk arbitrarily far past any sensible ladder and get a resolution
+            far below one base pair. Pinned as observed, with the value spelled
+            out; ``> 0`` holds for every number this could return, including a
+            correct one.
         """
         # Arrange
         info = TilesetInfo(
@@ -1000,7 +1032,7 @@ class TestTilesetInfo:
         )
 
         # Act & assert
-        assert info.resolution_for(50) > 0
+        assert info.resolution_for(50) == 1024 / 2**50 / 256
 
     # --- tile_span ----------------------------------------------------------
 
@@ -1021,6 +1053,7 @@ class TestTilesetInfo:
             256.0,
         ]
 
+    @pytest.mark.pinned
     def test_tile_span_should_disagree_with_the_geometry_on_an_explicit_ladder(
         self, explicit_info
     ):
@@ -1036,14 +1069,18 @@ class TestTilesetInfo:
             zoom, which only describes a quadtree -- its docstring lists only
             implicit call sites, so the precondition is real but undeclared,
             and a caller reaching for it on an mcool gets a wrong answer
-            silently. Pinned as observed rather than endorsed.
+            silently. Pinned as observed rather than endorsed, with both
+            values spelled out: ``declared != actual`` stays green if the
+            method starts producing a *different* wrong number, which tells a
+            reader nothing about which one it is.
         """
         # Act
         declared = explicit_info.tile_span(1)
         actual = explicit_info.canvas(1).binsize * explicit_info.tile_size
 
         # Assert
-        assert declared != actual
+        assert declared == 3_200_000
+        assert actual == 1_280_000
 
     def test_tile_span_should_raise_when_no_extent_is_declared(
         self, bare_info
@@ -1179,18 +1216,29 @@ class TestTilesetInfo:
     def test_canvas_should_hand_through_the_coordinate_system(
         self, implicit_info
     ):
-        """Test that the lattice can invert tile positions.
+        """Test that the lattice inverts against this tileset's own genome.
 
         Given:
-            A tileset carrying chromsizes.
+            A tileset carrying chromsizes, and the tile at zoom 1 that
+            straddles the boundary between them.
         When:
-            A canvas is taken and a tile position inverted.
+            A canvas is taken and that position inverted.
         Then:
-            It should yield genomic ranges rather than raising, the
-            coordinate system having been passed through.
+            It should name both contigs at their own offsets and the unnamed
+            overhang past the genome end. Asserting merely that the result is
+            non-empty would hold for *any* coordinate system handed through --
+            including an unrelated one -- and it is the identity of the genome
+            that is under test here.
         """
-        # Act & assert
-        assert list(implicit_info.canvas(1).invert(0))
+        # Act
+        ranges = list(implicit_info.canvas(1).invert(1))
+
+        # Assert
+        assert ranges == [
+            GenomicRange(cid=0, name="c1", start=512, end=600),
+            GenomicRange(cid=1, name="c2", start=0, end=400),
+            GenomicRange(cid=2, name=None, start=0, end=24),
+        ]
 
     def test_canvas_should_raise_when_an_explicit_ladder_has_no_genome(self):
         """Test the extent derivation without a coordinate system.
@@ -1533,7 +1581,7 @@ class TestTileset:
         Given:
             The tileset protocol, which declares several non-method members.
         When:
-            a class is checked against it.
+            A class is checked against it.
         Then:
             It should raise, as for the dataset protocol.
         """
@@ -1758,6 +1806,50 @@ class TestBaseTilesetParsing:
         with pytest.raises(AttributeError, match="ndim"):
             NoArity().parse_tile_id("uid.3.4")
 
+    def test_parse_tile_id_should_reject_options_when_none_are_declared(self):
+        """Test that an empty option set rejects rather than accepts.
+
+        Given:
+            A tileset declaring an empty frozenset of recognized options.
+        When:
+            A tile id carrying an option is parsed.
+        Then:
+            It should raise UnsupportedOption, since an empty set means
+            options are rejected -- not that any option is allowed.
+        """
+
+        # Arrange
+        class NoOptions(BaseTileset):
+            ndim = 1
+            options = frozenset()
+
+        # Act & assert
+        with pytest.raises(UnsupportedOption, match="bogus"):
+            NoOptions().parse_tile_id("uid.3.4,bogus:1")
+
+    def test_parse_tile_id_should_accept_a_declared_option(self):
+        """Test that a recognized option parses through.
+
+        Given:
+            A tileset declaring one recognized option key.
+        When:
+            A tile id carrying that option is parsed.
+        Then:
+            It should expose the option's value.
+        """
+
+        # Arrange
+        class OneOption(BaseTileset):
+            ndim = 1
+            options = frozenset({"cos"})
+
+        # Act
+        tid = OneOption().parse_tile_id("uid.3.4,cos:abc")
+
+        # Assert
+        assert tid.option("cos") == "abc"
+
+
     def test_parse_tile_id_should_reject_an_undeclared_option_key(self):
         """Test that a non-empty option set is forwarded, not just its truth.
 
@@ -1928,3 +2020,73 @@ class TestBaseTilesetLifetime:
             with tileset:
                 raise RuntimeError("boom")
         assert tileset.close_calls == 1
+
+
+# --- bounding policies ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "cls,attr,expected",
+    BOUNDING_POLICIES,
+    ids=[cls.__name__ for cls, _, _ in BOUNDING_POLICIES],
+)
+def test_tileset_should_declare_exactly_one_bounding_policy(cls, attr, expected):
+    """Test that each tileset answers one of the two questions, not both.
+
+    Given:
+        A tileset class and the bounding policy its kind calls for.
+    When:
+        Both policy attributes are read off it.
+    Then:
+        It should carry the one its kind calls for, with the expected value,
+        and not carry the other -- a dense type has no record count to cap and
+        a record type has no grid to resample, so declaring both would be
+        answering a question the type does not face.
+    """
+    # Arrange
+    other = "grid_policy" if attr == "density_policy" else "density_policy"
+
+    # Act & assert
+    assert getattr(cls, attr) == expected
+    assert not hasattr(cls, other)
+
+
+def test___instancecheck___should_accept_only_the_bounding_protocol_for_its_kind(
+    bed_tileset,
+):
+    """Test structural conformance to the bounding protocols.
+
+    Given:
+        A constructed record-based tileset.
+    When:
+        It is checked against both bounding protocols.
+    Then:
+        It should satisfy LimitsDensity and fail ResamplesGrid, since the two
+        are mutually exclusive by kind rather than both members of Tileset.
+    """
+    # Act & assert
+    assert isinstance(bed_tileset, LimitsDensity)
+    assert not isinstance(bed_tileset, ResamplesGrid)
+
+    def test___enter___should_bind_the_tileset_itself(self, bed_tileset):
+        """Test that a tileset is usable as a context manager.
+
+        Given:
+            A constructed tileset.
+        When:
+            It is used in a ``with`` block.
+        Then:
+            It should yield itself, and the tileset should still serve tiles after
+            the block. The subject here is a bed tileset, which holds no handle --
+            its ``close`` is documented as a no-op -- so there is no release to
+            observe; what ``__exit__`` must not do is leave the object unusable.
+            The releasing half of the contract is format-specific and is asserted
+            per format by the four ``test___exit___should_release_the_handle``
+            tests in ``test/tiles_v2``.
+        """
+        # Act
+        with bed_tileset as ts:
+            assert ts is bed_tileset
+
+        # Assert
+        assert bed_tileset.tiles([bed_tileset.parse_tile_id("x.0.0")])
