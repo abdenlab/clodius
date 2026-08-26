@@ -21,14 +21,13 @@ from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
 from clodius.core.policies import DEFAULT_POLICY
-from clodius.core.coords import GenomicRange
+from clodius.core.coords import GenomicRange, bin_count
 from clodius.core.errors import TileError
 from clodius.core.tileset import Ladder
 from clodius.tiles_v2 import cooler as mod
 from clodius.tiles_v2.cooler import (
     TILE_SIZE,
     CoolerTileset,
-    fetch_block,
     resolve_balance,
 )
 
@@ -36,16 +35,11 @@ from ..harness import genome
 from ..harness.wire import square
 
 
-#: For the pure-arithmetic properties in this module, which build nothing and
-#: take no fixture. They keep the wide budget; only the file-backed properties
-#: below pay for a rebuild per example.
-PROPERTY = settings(max_examples=200)
-
-# Property tests here rebuild a real bigWig, bigBed, mcool or HDF5 file per
-# example, so they cannot run on the ``pure`` profile's 200-example arithmetic
-# budget. ``function_scoped_fixture`` is suppressed for the same reason it is
-# in ``test/core/test_coords.py``: the fixtures these draw against are files
-# built once per test, not state that leaks between examples.
+# The property tests here read a real mcool per example, so they run on a much
+# smaller budget than the pure-arithmetic properties in ``test/core``.
+# ``function_scoped_fixture`` is suppressed for the same reason it is there:
+# the fixture these draw against is a file built once, not state that leaks
+# between examples.
 PROPERTY_IO = settings(
     max_examples=25,
     deadline=None,
@@ -75,94 +69,11 @@ def bins_past_the_genome(info, z, x):
     return int(math.ceil((hi - max(lo, total)) / canvas.binsize))
 
 
-
 @pytest.fixture
 def clr(shared_mcool):
     """The 4 bp resolution of the shared cooler, opened from the path."""
 
     return cooler.Cooler(f"{shared_mcool}::/resolutions/4")
-
-
-class TestBinCount:
-    """Bin accounting, which decides whether blocks in a strip agree on shape.
-
-    Reached through ``fetch_block``, whose block is shaped by the bin count on
-    each axis, rather than through the private helper that computes it: the
-    shape is what the reconciler consumes and what a wrong count corrupts.
-    """
-
-    @pytest.mark.parametrize(
-        "start,end,expected",
-        [
-            (0, 1000, 250),
-            (0, 150, 38),
-            (50, 150, 26),
-            (1, 2, 1),
-            (0, 0, 0),
-            (50, 54, 2),
-        ],
-        ids=["whole-contig", "aligned-start", "unaligned-start",
-             "sub-bin", "empty", "one-bin-wide-across-two"],
-    )
-    def test_fetch_block_should_round_the_shape_outward_from_both_ends(
-        self, clr, start, end, expected
-    ):
-        """Test the overlap-based bin count, through the block it shapes.
-
-        Given:
-            An interval on the first contig and the 4 bp resolution.
-        When:
-            A block is fetched for it.
-        Then:
-            Its row count should span ``floor(start / 4)`` to ``ceil(end / 4)``,
-            because cooler returns every bin the region *overlaps*. The last
-            case is the one that matters: ``50-54`` is exactly one bin wide but
-            straddles a boundary, so it touches two.
-        """
-        # Arrange
-        row = GenomicRange(0, "c1", start, end)
-        col = GenomicRange(0, "c1", 0, 4)
-
-        # Act
-        block = fetch_block(clr, row, col, 4, False)
-
-        # Assert
-        assert block.shape[0] == expected
-
-    @PROPERTY
-    @given(
-        start=st.integers(min_value=0, max_value=10_000),
-        span=st.integers(min_value=0, max_value=10_000),
-        binsize=st.integers(min_value=1, max_value=500),
-    )
-    def test_fetch_block_should_never_undercount_the_span(
-        self, start, span, binsize
-    ):
-        """Test the relationship to the naive count.
-
-        Given:
-            Any out-of-bounds interval and bin size.
-        When:
-            The padded block's shape is compared with ``ceil(span / binsize)``.
-        Then:
-            It should be at least as large, and at most one larger. An
-            undercount makes a fetched block narrower than the reconciler
-            expects, which is a shape error rather than a wrong value.
-        """
-        # Arrange
-        # A range with no chromosome name is out of bounds, and ``fetch_block``
-        # documents that such a block is padding rather than missing data --
-        # shaped from the bin count and returned without reading anything. The
-        # cooler is therefore ``None``: if the implementation ever did touch it
-        # on this path, this test would raise rather than quietly pass.
-        interval = GenomicRange(0, None, start, start + span)
-        naive = -(-span // binsize)
-
-        # Act
-        block = fetch_block(None, interval, interval, binsize, False)
-
-        # Assert
-        assert naive <= block.shape[0] <= naive + 1
 
 
 class TestResolveBalance:
@@ -295,7 +206,8 @@ class TestFetchBlock:
         """Test the padding case past the last chromosome.
 
         Given:
-            A row range with no chromosome name.
+            A row range with no chromosome name, and both ranges starting
+            mid-bin.
         When:
             The block is fetched with a cooler that would raise if touched.
         Then:
@@ -303,15 +215,60 @@ class TestFetchBlock:
             The reconciler needs the shape; the values are padding, not data.
         """
         # Arrange
-        row = GenomicRange(0, None, 0, 300)
-        col = GenomicRange(0, "c1", 0, 200)
+        # Both starts land inside a bin rather than on a boundary, which is
+        # what makes the shape depend on `bin_count` rounding *outward*. Ranges
+        # starting at 0 give the same answer under either rounding, so they
+        # cannot tell the contract from its negation.
+        row = GenomicRange(0, None, 50, 350)
+        col = GenomicRange(0, "c1", 50, 250)
 
         # Act
         block = mod.fetch_block(None, row, col, 100.0, False)
 
         # Assert
-        assert block.shape == (3, 2)
+        assert block.shape == (4, 3)
         assert np.all(np.isnan(block))
+
+    @pytest.mark.parametrize(
+        "start,end",
+        [(0, 400), (50, 150), (50, 54), (1, 2), (150, 999)],
+        ids=[
+            "aligned",
+            "unaligned-start",
+            "one-bin-wide-across-two",
+            "sub-bin",
+            "unaligned-both-ends",
+        ],
+    )
+    def test_fetch_block_should_return_as_many_bins_as_bin_count_predicts(
+        self, clr, start, end
+    ):
+        """Test the premise the shared bin count rests on.
+
+        Given:
+            An in-bounds interval at the 4 bp resolution, unaligned at one or
+            both ends.
+        When:
+            A block is fetched through the real cooler.
+        Then:
+            Its row count should equal ``bin_count`` for that interval.
+
+            ``bin_count``'s claim is that a fetcher returns every bin it
+            *overlaps*, and once the formula moved to ``clodius.core.coords``
+            every remaining test of it here reached it through the padding
+            path, where no cooler is involved. ``50-54`` is the discriminating
+            case: exactly one bin wide, straddling a boundary, so it touches
+            two.
+        """
+        # Arrange
+        row = GenomicRange(0, "c1", start, end)
+        col = GenomicRange(0, "c1", 0, 400)
+
+        # Act
+        block = mod.fetch_block(clr, row, col, 4.0, False)
+
+        # Assert
+        assert block.shape[0] == bin_count(row, 4.0)
 
     def test_fetch_block_should_return_float32(self, clr):
         """Test the block dtype.
@@ -391,6 +348,7 @@ class TestCoolerTilesetDeclarations:
         """
         # Act & assert
         assert CoolerTileset.grid_policy == "sequential"
+
     def test_modifiers_should_allow_an_unknown_transform_through(self):
         """Test that the modifier spec does not enumerate weight columns.
 

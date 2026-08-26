@@ -20,6 +20,7 @@ from clodius.core.coords import (
     Canvas,
     Chromsizes,
     GenomicRange,
+    bin_count,
     natsorted,
     reconcile_sequential,
     reconcile_sequential_2d,
@@ -95,8 +96,16 @@ def outward_bin_counts(intervals, binsize):
     """Bins each interval yields from an outward-rounding fetcher.
 
     ``ceil(end / b) - floor(start / b)``, which is what multivec's
-    ``bin_slice`` and cooler's ``_bin_count`` compute, and what over-supplies
-    by up to nearly two bins per chunk.
+    ``bin_slice`` and :func:`~clodius.core.coords.bin_count` compute, and
+    what over-supplies by up to nearly two bins per chunk.
+
+    Not a call to ``bin_count`` itself. The two genuinely differ on an
+    out-of-bounds interval: this takes the naive ``ceil(span / b)``, which is
+    what ``clodius.tiles_v2.multivec`` pads with, while ``bin_count`` rounds
+    outward there as everywhere else. The 1D and 2D reconcilers are fed by
+    different conventions and both are correct for their caller. Reusing
+    ``bin_count`` here would silently change which convention these tests
+    describe.
     """
     counts = []
     for iv in intervals:
@@ -1147,6 +1156,138 @@ def test_natsorted_should_match_legacy_on_real_assemblies(label, pairs, data):
 
     # Assert
     assert result == natsorted_utils(names) == natsorted_bigwig(names)
+
+
+class TestBinCount:
+    """Bin accounting, which decides whether blocks in a strip agree on shape.
+
+    Every dense 2D tileset shapes its fetched blocks with this, and the
+    reconcilers below consume those shapes, so an off-by-one here surfaces as
+    a misshapen tile rather than as a wrong value.
+    """
+
+    @pytest.mark.parametrize(
+        "start,end,expected",
+        [
+            (0, 1000, 250),
+            (0, 150, 38),
+            (50, 150, 26),
+            (1, 2, 1),
+            (0, 0, 0),
+            (50, 54, 2),
+        ],
+        ids=[
+            "whole-contig",
+            "aligned-start",
+            "unaligned-start",
+            "sub-bin",
+            "empty",
+            "one-bin-wide-across-two",
+        ],
+    )
+    def test_bin_count_should_round_outward_from_both_ends(
+        self, start, end, expected
+    ):
+        """Test the overlap-based count against hand-computed values.
+
+        Given:
+            An interval on a contig and a 4 bp resolution.
+        When:
+            Its bin count is taken.
+        Then:
+            It should span ``floor(start / 4)`` to ``ceil(end / 4)``, because a
+            fetcher returns every bin the region *overlaps*. The last case is
+            the one that matters: ``50-54`` is exactly one bin wide but
+            straddles a boundary, so it touches two.
+        """
+        # Arrange
+        interval = GenomicRange(0, "c1", start, end)
+
+        # Act
+        result = bin_count(interval, 4)
+
+        # Assert
+        assert result == expected
+
+    def test_bin_count_should_count_an_out_of_bounds_interval_the_same_way(
+        self,
+    ):
+        """Test that the formula does not branch on boundedness.
+
+        Given:
+            An interval with no chromosome name -- padding past the last
+            contig -- starting mid-bin.
+        When:
+            Its bin count is taken.
+        Then:
+            It should round outward exactly as an in-bounds interval does. The
+            count is the shape the reconciler expects for the padding block, so
+            a shorter count there is the same shape error as anywhere else.
+        """
+        # Arrange
+        interval = GenomicRange(0, None, 50, 150)
+
+        # Act
+        result = bin_count(interval, 4)
+
+        # Assert
+        assert result == 26
+
+    @pytest.mark.pinned
+    def test_bin_count_should_exceed_the_convention_multivec_pads_with(self):
+        """Test the divergence between the 1D and 2D padding conventions.
+
+        Given:
+            An out-of-bounds interval starting mid-bin.
+        When:
+            Its bin count is compared with the naive ``ceil(span / binsize)``
+            that ``clodius.tiles_v2.multivec`` uses to size the same padding.
+        Then:
+            They should differ by one. Both are correct for their own
+            reconciler, and nothing in either module says so -- the next person
+            to notice the duplication will unify them and silently change the
+            shape one of the two paths produces.
+        """
+        # Arrange
+        interval = GenomicRange(0, None, 50, 150)
+        naive = math.ceil((interval.end - interval.start) / 4)
+
+        # Act
+        result = bin_count(interval, 4)
+
+        # Assert
+        assert result == 26
+        assert naive == 25
+
+    @PROPERTY
+    @given(
+        start=st.integers(min_value=0, max_value=10_000),
+        span=st.integers(min_value=0, max_value=10_000),
+        binsize=st.integers(min_value=1, max_value=500),
+    )
+    def test_bin_count_should_never_undercount_the_span(
+        self, start, span, binsize
+    ):
+        """Test the relationship to the naive count.
+
+        Given:
+            Any interval and bin size.
+        When:
+            Its bin count is compared with ``ceil(span / binsize)``.
+        Then:
+            It should be at least as large, and at most one larger. An
+            undercount makes a fetched block narrower than the reconciler
+            expects, which is a shape error rather than a wrong value.
+        """
+        # Arrange
+        interval = GenomicRange(0, "c1", start, start + span)
+        naive = -(-span // binsize)
+
+        # Act
+        result = bin_count(interval, binsize)
+
+        # Assert
+        assert naive <= result <= naive + 1
 
 
 def test_reconcile_sequential_should_concatenate_when_no_drift_accumulates():
