@@ -1,3 +1,17 @@
+Unreleased
+
+- Add `.hic` support via a `HicTileset` in `clodius/tiles_v2/hic.py`, reading through
+  `hictkpy`. It serves the format's own resolution ladder in place, so a `.hic` no
+  longer has to be converted with `hic2cool` first. Nothing routes tiles to it yet --
+  `clodius/tiles/` is still what serves tiles, and `tiles_v2` has no consumer
+- Add `hictkpy` as a runtime dependency. It publishes wheels for every supported
+  Python and platform, reads `.cool` as well as `.hic`, and can write `.hic`, which
+  is what lets the test suite synthesize its fixture in-process rather than checking
+  one into `data/`
+- Add `.hic` to `infer_filetype`, mapping to the `matrix` datatype
+- Move the outward-rounding bin count out of `clodius/tiles_v2/cooler.py` into
+  `clodius.core.coords.bin_count`, where both 2D tilesets share it
+
 v0.22.2
 
 - Fix `tile_functions_parasail` D/I CIGAR inversion: `nw_trace_scan_profile_16`
