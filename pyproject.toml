@@ -14,6 +14,7 @@ dependencies = [
     "cooler>0.9.0",
     "dask",
     "h5py",
+    "hictkpy[numpy]>=1.4.0",
     "negspy",
     "numpy",
     "pandas>=1.0",

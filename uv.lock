@@ -517,6 +517,7 @@ dependencies = [
     { name = "cooler" },
     { name = "dask" },
     { name = "h5py" },
+    { name = "hictkpy", extra = ["numpy"] },
     { name = "negspy" },
     { name = "numpy" },
     { name = "oxbow" },
@@ -559,6 +560,7 @@ requires-dist = [
     { name = "cooler", specifier = ">0.9.0" },
     { name = "dask" },
     { name = "h5py" },
+    { name = "hictkpy", extras = ["numpy"], specifier = ">=1.4.0" },
     { name = "negspy" },
     { name = "numpy" },
     { name = "oxbow", specifier = ">=0.7.0" },
@@ -1146,6 +1148,38 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/41/8c/bbe98f813722b4873818a8db3e15aa3e625b59278566905ac439725e8070/h5py-3.16.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:346df559a0f7dcb31cf8e44805319e2ab24b8957c45e7708ce503b2ec79ba725", size = 5300253, upload_time = "2026-03-06T13:49:02.033Z" },
     { url = "https://files.pythonhosted.org/packages/32/9e/87e6705b4d6890e7cecdf876e2a7d3e40654a2ae37482d79a6f1b87f7b92/h5py-3.16.0-cp314-cp314t-win_amd64.whl", hash = "sha256:4c6ab014ab704b4feaa719ae783b86522ed0bf1f82184704ed3c9e4e3228796e", size = 3381671, upload_time = "2026-03-06T13:49:04.351Z" },
     { url = "https://files.pythonhosted.org/packages/96/91/9fad90cfc5f9b2489c7c26ad897157bce82f0e9534a986a221b99760b23b/h5py-3.16.0-cp314-cp314t-win_arm64.whl", hash = "sha256:faca8fb4e4319c09d83337adc80b2ca7d5c5a343c2d6f1b6388f32cfecca13c1", size = 2740706, upload_time = "2026-03-06T13:49:06.347Z" },
+]
+
+[[package]]
+name = "hictkpy"
+version = "1.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f4/d6/f32eb7d1583ea8b30decd655d9a0598028d097eb2d6def178f3205224747/hictkpy-1.4.0.tar.gz", hash = "sha256:4bd224bdfbd5348ee109f8e6187c1fb0c754fa62ca35c42b43ffd714e6044082", size = 7277376, upload_time = "2025-12-03T17:27:41.336Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9a/b2/ad2210d6a28b39defb3038a645e515aa96e989318f90492ca36a17eba841/hictkpy-1.4.0-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:366ea62cc401939341f0565a930dce65bb9a6787b334229fd4fd98c1670348eb", size = 10438214, upload_time = "2025-12-03T17:27:00.245Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/12/64431bdd4c0c4219725eb605c9eb4f3988f36399a33573aeeff15d717625/hictkpy-1.4.0-cp312-cp312-macosx_14_0_x86_64.whl", hash = "sha256:05fb428097fa98406d1a8ce9e163b5e3c28a9d86ccb5600187787279a39bde71", size = 12035563, upload_time = "2025-12-03T17:27:02.141Z" },
+    { url = "https://files.pythonhosted.org/packages/7b/aa/ad6bd4bee46746db2386abe9bd112b9df10be1bc7f68b18ec9e00fef0acf/hictkpy-1.4.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:bf208bde6ead343ae79e04a7fca7e3b660c3c5147d13597e328e5ae8838c270d", size = 12726326, upload_time = "2025-12-03T17:27:04.773Z" },
+    { url = "https://files.pythonhosted.org/packages/2b/12/945806e3f9f116dc69c3872e8ea652af129fa57cc78b60ba22bce59f1b10/hictkpy-1.4.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:c5c8d52906dba5a11e3e8052e21620debbdd9a5ea6c354ba9188474469edfaed", size = 14597290, upload_time = "2025-12-03T17:27:07.117Z" },
+    { url = "https://files.pythonhosted.org/packages/97/d1/c7607cc2af9d936184b5a12959ebeda90303f168b9417b7dbfe365c35ccf/hictkpy-1.4.0-cp312-cp312-win_amd64.whl", hash = "sha256:eabb63a1c17b5ed782ee77aecb791c38e5fa187e8a433dd5e810af55166d3af9", size = 6793345, upload_time = "2025-12-03T17:27:08.956Z" },
+    { url = "https://files.pythonhosted.org/packages/51/de/624c1473c50e5d9cbdc718802f6fa3b0d595d773c2ca3d93cdb130725a6e/hictkpy-1.4.0-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:c8ee203abdcda1174288e0f588515b99cfbf8a89f1d93602715e621e53f8475a", size = 10438484, upload_time = "2025-12-03T17:27:10.352Z" },
+    { url = "https://files.pythonhosted.org/packages/d0/f1/2cf2e91d8a54ed5515e0ff022537b908653f8ace1dfdb1aacc8cc2c286d2/hictkpy-1.4.0-cp313-cp313-macosx_14_0_x86_64.whl", hash = "sha256:5341b22f0029af51c3af12144f4b3bb96badc0b19da12b4c29679290132c420c", size = 12035309, upload_time = "2025-12-03T17:27:12.513Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/fe/1a2b46b643d9e2ed872854f149eabd7bc6ac421eed52b81b9b35f91a1ad6/hictkpy-1.4.0-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:4f090365bed700bcd5c7a87c8267ca1a1dbb8167bb1ba1f085ef6ddc350fdcbe", size = 12727045, upload_time = "2025-12-03T17:27:14.798Z" },
+    { url = "https://files.pythonhosted.org/packages/b0/7d/fcf75a0f76df345e6d95e7ae5eae16afff69c4275dc26bbf669943512446/hictkpy-1.4.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:e90c108f30a6f995e077240f3a18d237052cf8693e59f043675782fca18c702e", size = 14597318, upload_time = "2025-12-03T17:27:17.031Z" },
+    { url = "https://files.pythonhosted.org/packages/5f/cf/eb0984b6a2ec2d0af9b362726ae460fe0609c9a6c128b108b8bb7bfa1a39/hictkpy-1.4.0-cp313-cp313-win_amd64.whl", hash = "sha256:10b2c2bc2a38c0a1582b856c7f282a8ab06adb26319b9a6fc3daedd8d087efc6", size = 6793154, upload_time = "2025-12-03T17:27:19.376Z" },
+    { url = "https://files.pythonhosted.org/packages/37/16/7de5847229fff9adb20551ee98c6142c32df086367b785a68b13d1f308a4/hictkpy-1.4.0-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:cd75479875c2ed1afa374bc7d85dea98f9712bd157f167724f6f16f0111ac2bd", size = 10439169, upload_time = "2025-12-03T17:27:21.027Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/45/f712fb49c4557c691e898f32861279e765dccfcd65d917abae1c832fa61e/hictkpy-1.4.0-cp314-cp314-macosx_14_0_x86_64.whl", hash = "sha256:aa04bb5e14641515d84a6bb9add0c2177ee786e8d88801bd7987edca1fb419ef", size = 12036538, upload_time = "2025-12-03T17:27:23.084Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/6a/891f3f295a38aee65f8d9c0fd0a1b830b778fa8287703f8f00396f4ad05c/hictkpy-1.4.0-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:9ff224fdd71b847b81af4f3473d793f76303e12d28e21b9225516cd4d252a526", size = 12728456, upload_time = "2025-12-03T17:27:25.52Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/1d/ab1ade7d0cef8ac344dd9683d35cb4ccdff4421f5fb7ee8d8329d180ede1/hictkpy-1.4.0-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:a32694e7356d701615c11dcaec12541b327a9e5f9ab50e91ba04365226a9ecb9", size = 14597285, upload_time = "2025-12-03T17:27:28.551Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/f1/2e41d30452c89c2afa5bc82e4c6fe1aee333a17885c8944d3b6f74b51ee1/hictkpy-1.4.0-cp314-cp314-win_amd64.whl", hash = "sha256:9d075d305fcdf8aacd561f94109775f0b0706d46eb2bd2f45adadf4efa5bbe73", size = 7053777, upload_time = "2025-12-03T17:27:30.537Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/fa/1798ae803509bc638cce61ac1bac543ffc06ceb4edd42b3bc26da7beeaea/hictkpy-1.4.0-cp314-cp314t-macosx_14_0_arm64.whl", hash = "sha256:cc8115f2859f2cf5063f081cfd6dc5c42ffa1dcc678c211e913b4882b46523c2", size = 10457584, upload_time = "2025-12-03T17:27:32.584Z" },
+    { url = "https://files.pythonhosted.org/packages/77/30/6ac9f04dff49d5de8611e396eeebdc15bc28442023aa4b4106928529b4a4/hictkpy-1.4.0-cp314-cp314t-macosx_14_0_x86_64.whl", hash = "sha256:2a527cc091265f9415b5c09a3fa7c71c9533eeea093ba8cdb15b0e59eec0eb97", size = 12048427, upload_time = "2025-12-03T17:27:34.796Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/56/3032ceef1b7ac9630ed1d2bdb86462e6ae18ff01a22a766eaf86d04b852a/hictkpy-1.4.0-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:6b1b6199cf4728d346d63a1988c2caa5e01f5658a3ae7186e090a8e9c591e6d4", size = 12750874, upload_time = "2025-12-03T17:27:37.454Z" },
+    { url = "https://files.pythonhosted.org/packages/08/b2/7f5ce134d2d66fef3ec588ca86f7146e17e8940e6bba80a364dd6178860c/hictkpy-1.4.0-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:29aeeee3aad312d0a59334c0ae342390763ee2bee2ffb467dde43e38af1d59d1", size = 14615719, upload_time = "2025-12-03T17:27:39.436Z" },
+]
+
+[package.optional-dependencies]
+numpy = [
+    { name = "numpy" },
 ]
 
 [[package]]
