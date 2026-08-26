@@ -80,6 +80,8 @@ def infer_filetype(filename):
         return "bigwig"
     elif ext.lower() == ".mcool" or ext.lower() == ".cool":
         return "cooler"
+    elif ext.lower() == ".hic":
+        return "hic"
     elif ext.lower() == ".htime":
         return "time-interval-json"
     elif ext.lower() == ".hitile":
@@ -94,6 +96,8 @@ def infer_filetype(filename):
 
 def infer_datatype(filetype):
     if filetype == "cooler":
+        return "matrix"
+    if filetype == "hic":
         return "matrix"
     if filetype == "bigwig":
         return "vector"

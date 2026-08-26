@@ -15,6 +15,11 @@ FILETYPES = {
         "extensions": [".mcool"],
         "datatypes": ["matrix"],
     },
+    "hic": {
+        "description": "Juicer multi-resolution contact matrix",
+        "extensions": [".hic"],
+        "datatypes": ["matrix"],
+    },
     "bigwig": {
         "description": "Genomics focused multi-resolution vector file",
         "extensions": [".bw", ".bigwig"],
