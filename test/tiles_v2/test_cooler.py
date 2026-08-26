@@ -1,9 +1,11 @@
 """Tests for clodius.tiles_v2.cooler.
 
-The only 2D tileset, and the only one whose out-of-range behavior is settled:
-``clodius/tiles/cooler.py`` skips a tile past the ladder rather than raising,
-and ``test/tiles/test_conformance.py`` asserts the resulting empty list, so this
-rewrite skips too. Every other ``tiles_v2`` tileset still propagates.
+The first 2D tileset, and the one whose out-of-range behavior is settled by
+precedent rather than by choice: ``clodius/tiles/cooler.py`` skips a tile past
+the ladder rather than raising, and ``test/tiles/test_conformance.py`` asserts
+the resulting empty list, so this rewrite skips too. ``tiles_v2/hic.py`` adopts
+the same contract deliberately, having no predecessor to inherit it from; every
+other ``tiles_v2`` tileset still propagates.
 
 The fixture is a three-resolution mcool at 1/2/4 bp over the canonical 3000 bp
 genome, giving 12/6/3 tiles per zoom. Those numbers are what make the interior,
@@ -465,7 +467,7 @@ class TestCoolerTilesetInfo:
         assert info.min_pos == [1, 1]
         assert info.max_pos == [genome.CANONICAL_TOTAL] * 2
 
-    def test_canvas_should_size_the_extent_to_the_zoom(self, tileset):
+    def test_info_should_size_the_extent_to_the_zoom(self, tileset):
         """Test that an explicit ladder derives its lattice per level.
 
         Given:
