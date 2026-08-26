@@ -193,6 +193,91 @@ def build_mcool(
     return path
 
 
+def build_hic(
+    path,
+    chromsizes=CANONICAL_CHROMSIZES,
+    resolutions=(1, 2, 4),
+    seed=0,
+    n_pixels=400,
+    skip_all_vs_all_matrix=False,
+):
+    """A multi-resolution .hic with one matrix per entry in ``resolutions``.
+
+    The resolution defaults match :func:`build_mcool` and are chosen for the
+    same reason -- a hic tile is also 256 bins wide, so on the 3 kb canonical
+    genome 1/2/4 spans 12/6/3 tiles, tiles straddle chromosome boundaries, and
+    the last tile at every zoom overhangs the genome end.
+
+    Unlike ``cooler.create_cooler``, which is called once per resolution,
+    ``hictkpy.hic.FileWriter`` takes pixels **once** in the bin space of the
+    finest resolution and coarsens them itself -- juicer ``pre`` semantics.
+    Passing the same pixels again per resolution would double every count.
+
+    Pixels are upper-triangle only (``bin1_id <= bin2_id``) and sorted. The
+    writer's ``validate`` default rejects a lower-triangle pixel outright, and
+    a ``.hic`` has no square storage mode to opt into, which is why there is no
+    ``symmetric_upper`` parameter here.
+
+    ``resolutions`` is **sorted before the writer sees it**, so the declaration
+    order a caller passes is not observable in the result. It cannot be: the
+    writer coarsens from each resolution to the next and rejects a descending
+    list at ``finalize`` with ``coarsening factor should be > 1``. A test that
+    wants to say something about ladder order has to say it about the values,
+    not the order they were given in.
+
+    ``skip_all_vs_all_matrix`` defaults to ``False``, so the file carries the
+    ``All`` pseudo-chromosome that ``chromosomes()`` excludes and
+    ``chromosomes(include_ALL=True)`` reveals. That entry is what the exclusion
+    test has to bite on; skipping it would make that test vacuous. Pass ``True``
+    to get the other writer mode, where there is no entry to exclude.
+
+    ``n_pixels=0`` finalizes a file with no interactions at all -- a real state
+    for a fully filtered dataset, and one the random draw can never reach. Such
+    a file is served correctly as zeros, but note that an *unbounded* fetch on
+    one (``File.fetch()`` with no range arguments) segfaults hictkpy 1.4.0 and
+    takes the interpreter with it. The tilesets never issue that call shape --
+    ``fetch_block`` always passes both ranges -- so this is a hazard for test
+    code reading the fixture directly, not for the code under test.
+
+    Normalization vectors are *not* written -- ``avail_normalizations()`` on
+    the result is empty. The writer stores pixels; computing KR or VC is
+    juicer's job. This is why ``resolve_normalization`` takes a list of names
+    rather than an open file: its contract has to be testable without a fixture
+    that can carry weights.
+    """
+    hictkpy = pytest.importorskip("hictkpy")
+    rng = np.random.default_rng(seed)
+
+    base = min(resolutions)
+    n = sum(-(-int(length) // base) for _, length in chromsizes)
+
+    size = min(4 * n, n_pixels)
+    b1 = rng.integers(0, n, size=size)
+    b2 = rng.integers(0, n, size=size)
+    # Fold onto the upper triangle, then coalesce duplicate (bin1, bin2) pairs
+    # into a count the way a real pixel table stores them.
+    keys = np.minimum(b1, b2).astype(np.int64) * n + np.maximum(b1, b2)
+    keys, counts = np.unique(keys, return_counts=True)
+    bin1, bin2 = np.divmod(keys, n)
+
+    writer = hictkpy.hic.FileWriter(
+        str(path),
+        {name: int(length) for name, length in chromsizes},
+        sorted(resolutions),
+        skip_all_vs_all_matrix=skip_all_vs_all_matrix,
+    )
+    if size:
+        writer.add_pixels_from_dict(
+            {
+                "bin1_id": bin1.tolist(),
+                "bin2_id": bin2.tolist(),
+                "count": counts.tolist(),
+            }
+        )
+    writer.finalize()
+    return path
+
+
 def build_mv5(
     path,
     chromsizes=CANONICAL_CHROMSIZES,
