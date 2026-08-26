@@ -419,6 +419,31 @@ class Canvas:
         return self.chromsizes.invert(self.tile_span(x))
 
 
+def bin_count(interval: GenomicRange, binsize: float) -> int:
+    """Bins a fetch of this interval returns.
+
+    Outward rounding -- ``floor(start / b)`` to ``ceil(end / b)`` -- because
+    a fetcher returns every bin that *overlaps* the region. That is one more
+    than ``ceil(span / b)`` whenever the interval starts mid-bin, and getting
+    it wrong makes blocks in the same strip disagree on shape. Same formula as
+    the chromosome-relative bin slice ``floor(start/b) .. ceil(end/b)``.
+
+    Shared rather than per-format: cooler and hic both shape their blocks with
+    it, and a formula whose failure mode is a silently misshapen tile is worth
+    having in one place. It is not yet the only copy --
+    ``clodius.tiles_v2.multivec.bin_slice`` computes the same rounding for the
+    1D path, and consolidating that one is a separate change, because multivec
+    pads an out-of-bounds interval by the naive ``ceil(span / b)`` instead.
+
+    Applied unconditionally here, including to an out-of-bounds interval:
+    there the interval is padding and the count is the shape the 2D reconciler
+    expects to receive.
+    """
+    return math.ceil(interval.end / binsize) - math.floor(
+        interval.start / binsize
+    )
+
+
 def reconcile_sequential(
     chunks: Iterable[tuple[Sequence, float]],
     binsize: float,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from functools import cached_property
 
 import cooler
@@ -21,6 +20,7 @@ from clodius.core import (
     TileOutOfBounds,
     TilePolicy,
     TilesetInfo,
+    bin_count,
     reconcile_sequential_2d,
 )
 
@@ -87,7 +87,7 @@ def fetch_block(
     binsize: float,
     balance: str | bool,
 ):
-    shape = (_bin_count(row, binsize), _bin_count(col, binsize))
+    shape = (bin_count(row, binsize), bin_count(col, binsize))
     if row.is_out_of_bounds or col.is_out_of_bounds:
         # Past the last chromosome: padding, not missing data. Same contract as
         # the 1D path -- the caller supplies a correctly shaped NaN block.
@@ -95,20 +95,6 @@ def fetch_block(
 
     block = clr.matrix(balance=balance).fetch(row.as_tuple(), col.as_tuple())
     return block.astype(np.float32)
-
-
-def _bin_count(interval: GenomicRange, binsize: float) -> int:
-    """Bins a fetch of this interval returns.
-
-    Outward rounding -- ``floor(start / b)`` to ``ceil(end / b)`` -- because
-    cooler returns every bin that *overlaps* the region. That is one more than
-    ``ceil(span / b)`` whenever the interval starts mid-bin, and getting it wrong
-    makes blocks in the same strip disagree on shape. Same formula as
-    the chromosome-relative bin slice ``floor(start/b) .. ceil(end/b)``.
-    """
-    return math.ceil(interval.end / binsize) - math.floor(
-        interval.start / binsize
-    )
 
 
 class CoolerTileset(BaseTileset):
