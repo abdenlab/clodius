@@ -7,6 +7,11 @@ from clodius.tiles.bigwig import abs2genomic
 from clodius.utils import TILE_OPTIONS_CHAR
 
 
+# Distinct from every value `fetcher` can yield, so "no more records" is
+# unambiguous.
+_EXHAUSTED = object()
+
+
 def grouper(n, iterable):
     it = iter(iterable)
     while True:
@@ -17,25 +22,35 @@ def grouper(n, iterable):
 
 
 def generic_regions(fetcher, offset, limit):
+    """Page through a region iterator.
+
+    Returns
+    -------
+    (rows, has_next): (list, bool)
+        The requested page and whether another page follows. Callers unpack
+        this pair; the caller-side envelope ({offset, limit, results, next})
+        is assembled by the server, not here.
+    """
     if offset:
         for i in range(offset):
             try:
                 next(fetcher)
             except StopIteration:
-                return {"offset": offset, "limit": limit, "results": [], "next": False}
-
-    curr_page = next(grouper(limit, fetcher))
+                # offset ran past the end of the data
+                return ([], False)
 
     try:
-        # see if there's another page of results
-        next_page = next(grouper(limit, fetcher))
-        next_page = True
+        curr_page = next(grouper(limit, fetcher))
     except StopIteration:
-        next_page = False
+        # offset landed exactly at the end of the data
+        return ([], False)
 
-    ret = curr_page
+    # One record answers "is there another page". `grouper` materializes a
+    # whole tuple of up to `limit` records, and `l` is capped at 10000 on the
+    # wire, so the old form parsed up to 10000 records only to discard them.
+    next_page = next(fetcher, _EXHAUSTED) is not _EXHAUSTED
 
-    return (ret, next_page)
+    return (list(curr_page), next_page)
 
 
 def regions(filename, chromsizes, offset, limit):

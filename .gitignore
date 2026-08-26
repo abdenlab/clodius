@@ -85,3 +85,8 @@ aws_keys.py
 a.out
 test/sample_data/3_header_100_testfile.bed.multires.mv5
 test/sample_data/states_format_input_testfile.bed.multires.mv5
+
+# Local SDLC pipeline artifacts: review and verification documents written by
+# the review skill. Nothing reads them back, and they describe one branch's
+# working history rather than the project.
+.sdlc/

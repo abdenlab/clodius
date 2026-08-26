@@ -33,7 +33,8 @@ dependencies = [
     "biopython",
     "shortuuid",
     "pybigtools",
-    "scipy"
+    "scipy",
+    "bioframe>=0.8.0",
 ]
 requires-python = ">=3.12"
 license = { text = "MIT" }
@@ -44,18 +45,70 @@ urls = { homepage = "https://github.com/higlass/clodius" }
 clodius = "clodius.cli.aggregate:cli"
 tsv_to_mrmatrix = "clodius._tsv_to_mrmatrix:main"
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
-    "autopep8",
     "bumpversion",
-    "flake8",
+    "hypothesis",
     "pytest",
     "pytest-cov",
+    "pytest-mock",
+    "ruff",
 ]
+# Only `notebooks/` imports higlass-python. Keeping it out of
+# `project.dependencies` spares every `pip install clodius` a viewer/widget
+# stack and its transitive jupyter tree, and avoids a dependency cycle --
+# higlass-python sits downstream of clodius.
+notebooks = [
+    "higlass-python>=1.4.0",
+]
+
+[tool.ruff]
+line-length = 80
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle error
+    "W",    # pycodestyle warning
+    "F",    # pyflakes
+    "C90",  # mccabe complexity, carried over from the deleted .flake8
+]
+ignore = [
+    "E203",  # whitespace before ':' (conflicts with black)
+    "E501",  # line too long
+    "E722",  # do not use bare 'except'
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+# F401: re-exports. E402: submodules that must be imported after the objects
+# they register against are defined (see clodius/cli/__init__.py).
+"__init__.py" = ["E402", "F401"]
+
+# C901: functions that predate the complexity gate. This list is a ratchet --
+# new code must pass at max-complexity 10, and an entry comes off as its
+# functions are broken up. Nothing is added to it.
+"clodius/cli/aggregate.py" = ["C901"]
+"clodius/cli/convert.py" = ["C901"]
+"clodius/multivec.py" = ["C901"]
+"clodius/tiles/bam.py" = ["C901"]
+"clodius/tiles/bam_pysam.py" = ["C901"]
+"clodius/tiles/bigbed.py" = ["C901"]
+"clodius/tiles/geo.py" = ["C901"]
+"clodius/tiles/gff.py" = ["C901"]
+"clodius/tiles/tabix.py" = ["C901"]
+"scripts/gff_to_genepred.py" = ["C901"]
+"scripts/make_single_threaded_tiles.py" = ["C901"]
+"scripts/make_tiles.py" = ["C901"]
 
 [tool.pytest.ini_options]
 addopts = "--cov=clodius --tb=native"
 testpaths = ["test"]
+markers = [
+    "integration: exercises a real cross-boundary interaction (subprocess, network, on-disk format)",
+    "pinned: records behavior as observed on a question that is open, not a contract that is settled",
+]
 
 [tool.coverage.report]
 exclude_lines = [
@@ -63,6 +116,3 @@ exclude_lines = [
     "return NotImplemented",
     "raise NotImplementedError",
 ]
-
-[tool.hatch.envs.default]
-features = ["dev"]
