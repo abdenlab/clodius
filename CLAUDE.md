@@ -57,3 +57,20 @@ uv run ruff format clodius
 - **Dependencies**: runtime deps in `[project.dependencies]`; development deps in `[dependency-groups]` (PEP 735), managed with uv and pinned in `uv.lock`. CI installs with `uv sync --locked`.
 - **Main branch**: `main` (use this as the base for PRs)
 - **Python packaging**: `pyproject.toml` (no `setup.py`)
+
+## Test conventions — local carve-outs
+
+The Python test guide is the default. These are the points where this repo diverges deliberately, recorded here so the divergence is a decision rather than drift.
+
+- **`<method_name>` for a class, enum, constant, or module attribute.** The guide fixes the slot to a method's `__name__` and defines no form for a name that is not a method. Where a test exercises a class, enum or module-level constant as a whole, the slot carries the snake-cased symbol name: `test_tile_kind_should_*` for `TileKind`, `test_grid_policy_should_*` for `GridPolicy`, `test_ladder_should_*` for `Ladder`. Dunder attributes keep the guide's literal form, so `__all__` gives `test___all___should_*`. A name must still describe what the body verifies — that part is not carved out, and a test whose name points at a different unit than its assertions is a defect regardless of this entry.
+- **`Test<Behavior>` classes over module-level functions.** §9 asks for module-level test functions and reserves `Test<Scenario>` classes for suites with "no first-party class under test". A cohesive suite over one module-level function may use a behavior-named class even where a first-party class shares the file — `TestOverlapPredicate`, `TestMaxRecords`, `TestBinCount`. The classes carry the explanatory docstrings that make these suites navigable, and flattening them would lose that with nothing gained.
+- **`test/tiles/test_conformance.py` does not mirror a module.** It asserts one property — a dense tile holds exactly the bin count its `tileset_info` advertises — across bigwig, cooler and fasta, against the real fixtures in `data/`. The cross-type framing is the point: each type reconciles a ragged grid onto the uniform lattice differently, and the file exists to state that they must agree. Splitting it per module would also split the shared LFS fixture declarations and the availability check that reports on all of them at once.
+
+## Marker conventions
+
+Registered in `pyproject.toml` under `[tool.pytest.ini_options]`.
+
+- `integration` — exercises a real cross-boundary interaction: a subprocess, network I/O, an on-disk format. `pytest -m "not integration"` is the fast inner loop.
+- `pinned` — records behavior as observed on a question that is open, not a contract that is settled. `pytest -m pinned` enumerates every such decision in one command, which is what keeps them reviewable instead of scattered through docstrings.
+
+Skipping on un-smudged git-LFS payloads is not a marker: `test/harness/lfs.py::requires_lfs` returns a `pytest.mark.skipif`, evaluated per call site.
