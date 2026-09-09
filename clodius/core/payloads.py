@@ -40,6 +40,7 @@ class TileKind(str, Enum):
     DENSE = "dense"
     BEDLIKE = "bedlike"
     BEDLIKE_2D = "bedlike_2d"
+    PAIRED = "paired"
     GENE_MODELS = "gene_models"
     COLUMNAR = "columnar"
     SUBS = "subs"
@@ -211,10 +212,60 @@ class BedlikeTile(TypedDict):
 
 
 class Bedlike2DTile(BedlikeTile):
-    """2D annotation record. Users: bedpe, bed2ddb."""
+    """2D annotation record, as ``bed2ddb`` and ``bedarcsdb`` emit it.
+
+    Inherits a single ``chrOffset``, which is what those two produce
+    (``bed2ddb.py:150``, ``bedarcsdb.py:144``).
+
+    That single offset is **anchor 1's**, not a claim that the anchors share a
+    chromosome. Aggregation resolves the two chromosomes independently
+    (``cli/aggregate.py:231-242``), so ``xStart``/``yStart`` are correct
+    absolute coordinates even for an inter-chromosomal pair; only
+    ``chrOffset = xs[0] - start1`` is stored, and anchor 2's offset is dropped.
+    A consumer can therefore recover anchor 1's chromosome-relative position but
+    not anchor 2's, unless the two happen to coincide. Both sample databases in
+    ``test/sample_data`` are entirely intra-chromosomal -- loops and domains
+    always are -- which is why the gap is invisible in practice.
+
+    ``bedpe`` does not match this shape at all: it emits ``xChrOffset`` and
+    ``yChrOffset`` and no ``chrOffset`` (``bedpe.py:122``). So the producers of
+    "2D bedlike" disagree on the key that locates the record, and no single
+    TypedDict covers both. :class:`BedpeTile` models the second; which one the
+    client actually reads is section 2.6 (open questions).
+    """
 
     yStart: int
     yEnd: int
+
+
+class PairedTile(Bedlike2DTile):
+    """A paired-interval record: two anchors that may be on different chromosomes.
+
+    Extends :class:`Bedlike2DTile` rather than replacing it, so the wire shape
+    is a superset of what ``bed2ddb`` already emits. That nesting is what makes
+    it safe to serve to existing tracks:
+
+    - ``Annotations2dTrack`` reads ``uid``/``xStart``/``yStart``/``xEnd``/
+      ``yEnd``/``fields``/``importance`` and no offsets at all, so the extra
+      keys are inert to it.
+    - ``Arcs1DTrack`` (higlass-arcs) reads ``xStart``, then ``yStart`` or
+      ``xEnd``, and falls back to ``chrOffset + fields[n]`` -- which it uses
+      unconditionally when the ``startField``/``endField`` options are set.
+
+    ``chrOffset`` is therefore required, and is the *x* anchor's offset,
+    matching ``bed2ddb``. Legacy ``bedpe`` omits it and emits only
+    ``xChrOffset``/``yChrOffset`` (``bedpe.py:122``), so a bedpe tileset in an
+    arcs track with ``startField`` set computes ``undefined + n`` and yields
+    NaN coordinates. Carrying all three keys fixes that without removing
+    anything a consumer might read.
+
+    ``xChrOffset``/``yChrOffset`` are kept because they carry what ``chrOffset``
+    structurally cannot: anchor 2's chromosome, for inter-chromosomal pairs.
+    Nothing reads them today.
+    """
+
+    xChrOffset: int
+    yChrOffset: int
 
 
 # --- D. gene models ---------------------------------------------------------
@@ -301,6 +352,7 @@ PAYLOAD_TYPES: dict[TileKind, Any] = {
     TileKind.DENSE: DenseTilePayload,
     TileKind.BEDLIKE: BedlikeTile,
     TileKind.BEDLIKE_2D: Bedlike2DTile,
+    TileKind.PAIRED: PairedTile,
     TileKind.GENE_MODELS: GeneModelTile,
     TileKind.COLUMNAR: ColumnarTile,
     TileKind.SUBS: SubsTile,
