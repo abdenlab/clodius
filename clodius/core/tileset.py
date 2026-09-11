@@ -3,14 +3,20 @@ from __future__ import annotations
 import math
 from functools import cached_property
 from enum import Enum
-from typing import ClassVar, Protocol, Sequence, runtime_checkable
+from collections.abc import Mapping
+from typing import Any, ClassVar, Protocol, Sequence, runtime_checkable
 
-from clodius.core.coords import Canvas, Chromsizes
-from clodius.core.payloads import TileKind, RegionRow
+from clodius.core.coords import TileCanvas, Chromsizes
+from clodius.core.tile import AnnotationRecord, TileKind
 from clodius.core.policies import TilePolicy
 from clodius.core.tileid import ModifierSpec, TileId
 from clodius.core.errors import TileOutOfBounds
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    field_validator,
+    model_validator,
+)
 
 
 @runtime_checkable
@@ -19,8 +25,7 @@ class Dataset(Protocol):
 
     ``chromsizes`` and ``time_interval`` are datasets but NOT tilesets: the
     client fetches them once in full and does its own up/downsampling, so they
-    have no resolution ladder and no ``tiles()``. They are the only two such
-    modules in ``clodius/tiles/``.
+    have no resolution ladder and no ``tiles()``.
     """
 
     # HiGlass datatype string ('vector', 'matrix', 'bedlike', 'chromsizes', ...).
@@ -37,14 +42,11 @@ class Dataset(Protocol):
 class Tileset(Dataset, Protocol):
     """A dataset served tile-by-tile through a resolution ladder."""
 
-    # --- declarative capability surface -------------------------------------
-
-    # Number of coordinate slots after ``z``. 1 for vectors, 2 for matrices.
-    # Note bedpe and bed2ddb serve BOTH today, inferring from tile-id arity.
+    # Number of coordinate slots after ``z``.
     ndim: ClassVar[int]
 
     # What ``tiles()`` returns, so a server knows what it is holding.
-    tile_kind: ClassVar[TileKind]
+    datatype: ClassVar[str]
 
     # What the modifier slot accepts, or None if the type declares none.
     modifiers: ClassVar[ModifierSpec | None]
@@ -52,46 +54,54 @@ class Tileset(Dataset, Protocol):
     # Recognized ``,key:value`` option keys. Empty means options are rejected.
     options: ClassVar[frozenset[str]]
 
-    # Limits applied when serving. Instance-level: a server may vary it per
-    # tileset.
+    # Limits applied when serving.
     policy: TilePolicy
 
-    # --- the two core methods -----------------------------------------------
+    def info(self) -> TilesetInfo: ...
 
-    def info(self) -> TilesetInfo:
-        """Narrows :meth:`Dataset.info` to guarantee a resolution ladder."""
-        ...
-
-    def tiles(self, ids: Sequence[TileId]) -> list[tuple[TileId, object]]:
+    def tiles(
+        self,
+        ids: Sequence[TileId],
+        options: Mapping[str, Any] | None = None,
+    ) -> list[tuple[TileId, TileKind]]:
         """Fetch a batch of tiles.
 
-        Batched (rather than one call per tile) so scan-oriented backends can
-        coalesce adjacent requests -- see ``utils.partition_by_adjacent_tiles``.
+        Parameters
+        ----------
+        ids : Sequence[TileId]
+            One or more tile IDs for fetching. Batching makes it possible for
+            adjacent requests to be coalesced into a single fetch pass.
+        options : Mapping, optional
+            Per-request settings that apply to the whole batch, from the
+            ``options`` object of a ``POST /tiles/`` body.
 
-        Returns pairs rather than a dict so the boundary can echo
-        ``tile_id.raw`` as the response key, making the round-trip requirement
-        structural instead of per-module bookkeeping.
+        Returns
+        -------
+        list[tuple[TileId, TileKind]]
+            Pairs of tile IDs and matched payloads. A tile that cannot be
+            served carries a :class:`TileError` in the payload slot.
 
-        Implementations MUST return one entry per requested id, or raise. They
-        must never drop siblings -- that is the current bug in ``vcf.py:195``,
-        ``bam.py:628`` and ``bam_pysam.py:359``.
+        Notes
+        -----
+        Implementations MUST return one entry per requested ID, in any order.
+        The client and server match responses to requests by exact raw tile ID
+        string, which is why the TileId travels with its payload.
+
+        Failures to fetch individual tiles should be caught and return a
+        TileError as response payload. A whole-batch failure should raise
+        TilesetUnavailable and propagate to the server. Malformed ``options``
+        are a whole-batch failure: they arrive once, for every tile at once.
         """
         ...
 
     def close(self) -> None:
-        """Release file handles. ``cooler.mats`` holds h5py handles open
-        forever today; this is what gives them a defined lifetime."""
+        """Release file handles."""
         ...
 
 
 @runtime_checkable
 class ProvidesChromsizes(Protocol):
-    """Backs ``GET /chrom-sizes/?id=<uid>``.
-
-    Implemented today by: chromsizes (get_tsv_chromsizes), bigwig.chromsizes,
-    bigbed.chromsizes. Also derivable from gff (gff_chromsizes:21), fasta (.fai)
-    and pileup (_chromsizes_from_fasta:457), which currently keep it private.
-    """
+    """Backs ``GET /chrom-sizes/?id=<uid>``."""
 
     def chromsizes(self) -> Chromsizes: ...
 
@@ -100,43 +110,25 @@ class ProvidesChromsizes(Protocol):
 class ProvidesRegions(Protocol):
     """Backs a paginated annotation-listing endpoint.
 
-    NOT part of vanilla HiGlass. This is a resgen extension: served by
-    resgen-server's ``/regions/`` view and consumed by the resgen-app
-    ``RegionsList`` component. Worth keeping as a declared capability so the
-    extension has a defined seam, but nothing in stock HiGlass calls it.
-
-    Wire contract, confirmed against both ends::
+    This is a resgen extension served by resgen-server's ``/regions/``
+    view and consumed by the resgen-app ``RegionsList`` component.
 
         GET api/v1/regions/?d=<uid>&o=<offset>&l=<limit>
-        -> {"offset": int, "limit": int, "results": [RegionRow], "next": bool}
-
-    ``o`` defaults to 0 and is rejected above 1000; ``l`` defaults to 20 and is
-    capped at 10000. The view also accepts ``cs`` and ``s`` params but ignores
-    them. Only ``bed``/``bedfile`` and ``vcf`` are dispatched; anything else
-    raises.
-
-    The envelope is assembled by the *view*, not by clodius -- so the tuple
-    below is the right internal shape, not an approximation of the wire.
-
-    Implemented today by ``bedfile.regions:337`` and ``vcf.regions:41``, both
-    delegating to ``vcf.generic_regions:19``.
+        -> {"offset": int, "limit": int, "results": [AnnotationRecord], "next": bool}
     """
 
     def regions(
         self, offset: int, limit: int
-    ) -> tuple[list[RegionRow], bool]: ...
+    ) -> tuple[list[AnnotationRecord], bool]: ...
 
 
 class BaseTileset:
-    """Optional convenience base: context-manager support and defaults.
-
-    Implementing :class:`Tileset` does not require subclassing this -- it is a
-    ``Protocol``, so structural typing applies.
-    """
+    """Optional convenience base: context-manager support and defaults."""
 
     modifiers: ClassVar[ModifierSpec | None] = None
     options: ClassVar[frozenset[str]] = frozenset()
 
+    tile_size: int
     policy: TilePolicy
 
     def parse_tile_id(self, tile_id: str) -> TileId:
@@ -158,7 +150,7 @@ class BaseTileset:
         self.close()
 
 
-def quadtree_depth(total_length: int, tile_size_bp: int) -> int:
+def _quadtree_depth(total_length: int, tile_size_bp: int) -> int:
     """
     Number of zoom levels to cover ``total_length`` with a specific quadtree.
 
@@ -189,34 +181,16 @@ def quadtree_depth(total_length: int, tile_size_bp: int) -> int:
 
 
 class Ladder(str, Enum):
-    """How a tileset serializes its resolution ladder.
+    """How a tileset serializes its resolution ladder."""
 
-    ``z`` always means "index into the ladder, coarsest first". Only the
-    serialization differs -- and it is a property of the *file*, not the
-    filetype: cooler uses IMPLICIT for legacy single-res ``.cool`` and EXPLICIT
-    for ``.mcool``.
-    """
-
-    # Power-of-two spaced, derived from ``max_zoom`` + ``tile_size``.
+    # Quadtree, power-of-two spaced, derived from ``max_zoom`` + ``tile_size``.
     IMPLICIT = "implicit"
     # Arbitrary, enumerated in ``resolutions``.
     EXPLICIT = "explicit"
 
 
 class DatasetInfo(BaseModel):
-    """Fields common to anything servable, tiled or not.
-
-    Not every dataset HiGlass consumes is a tileset. ``chromsizes`` and
-    ``time_interval`` are fetched once in their entirety and rendered
-    client-side -- chromsizes via the dedicated ``chrom-sizes?id=`` endpoint --
-    so they have no resolution ladder and no ``tiles()``. For those two the
-    entire dataset content *is* the info response.
-
-    Per-type extensions (``aggregation_modes``, ``row_infos``, ``header``,
-    ``max_per_tile``, ``start_value``, ...) are permitted via ``extra="allow"``
-    during migration. The plan is per-type subclasses that declare their own
-    fields, with ``extra`` flipped to ``"forbid"`` as each type migrates.
-    """
+    """Fields common to anything servable, tiled or not."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -232,18 +206,21 @@ class DatasetInfo(BaseModel):
             raise ValueError("max_width must be > 0")
         return v
 
+    def to_dict(self) -> dict[str, Any]:
+        """The info as the client should receive it.
+
+        Unset optionals are dropped rather than serialized as ``null``, because
+        `null` is not interchangeable with *absent* on the wire.
+        """
+        return self.model_dump(exclude_none=True)
+
 
 class TilesetInfo(DatasetInfo):
-    """A :class:`DatasetInfo` that also carries a resolution ladder.
-
-    This is the model for anything served through ``tiles()``. The ladder
-    accessors live here rather than on the base so that asking a non-tiled
-    dataset for its zoom levels is a type error, not a runtime surprise.
-    """
+    """A :class:`DatasetInfo` that also carries a resolution ladder."""
 
     # --- ladder, implicit form (power-of-two) ---
     max_zoom: int | None = None
-    tile_size: int | None = None
+    tile_size: int | None = None  # in bins
 
     # --- ladder, explicit form ---
     resolutions: list[int] | None = None
@@ -262,7 +239,72 @@ class TilesetInfo(DatasetInfo):
             raise ValueError("tile_size must be > 0")
         return v
 
-    # --- ladder access -------------------------------------------------------
+    @model_validator(mode="after")
+    def _implicit_ladder_is_a_quadtree(self) -> TilesetInfo:
+        """An implicit ladder must span exactly ``tile_size * 2**max_zoom``.
+
+        That is what makes every level's resolution a whole number of base
+        pairs, and it is what :meth:`quadtree` constructs. Precomputed files
+        satisfy it too -- ``cli/aggregate`` writes the same product. Asserted
+        rather than rounded away, so a file that breaks it is loud.
+        """
+        if self.resolutions:
+            return self
+        if (
+            self.max_width is None
+            or self.tile_size is None
+            or self.max_zoom is None
+        ):
+            return self
+        expected = self.tile_size * 2**self.max_zoom
+        if self.max_width != expected:
+            raise ValueError(
+                f"implicit ladder is not a quadtree: max_width "
+                f"{self.max_width} != tile_size {self.tile_size} * 2**max_zoom "
+                f"{self.max_zoom} ({expected})"
+            )
+        return self
+
+    @classmethod
+    def quadtree(
+        cls,
+        chromsizes: Chromsizes,
+        tile_size: int,
+        *,
+        ndim: int = 1,
+        **fields,
+    ) -> TilesetInfo:
+        """Build the info for a quadtree tileset over ``chromsizes``.
+
+        Parameters
+        ----------
+        chromsizes : Chromsizes
+            Coordinate system to cover.
+        tile_size : int
+            Size of a single tile in base pairs at the highest resolution.
+        ndim : int, optional
+            Number of coordinate axes, which sets the length of ``min_pos`` and
+            ``max_pos``.
+        **fields
+            Additional model fields, overriding any of the derived ones.
+
+        Returns
+        -------
+        TilesetInfo
+        """
+        total = chromsizes.total_length
+        max_zoom = _quadtree_depth(total, tile_size)
+        return cls(
+            **{
+                "min_pos": [0] * ndim,
+                "max_pos": [total] * ndim,
+                "max_width": tile_size * 2**max_zoom,
+                "tile_size": tile_size,
+                "max_zoom": max_zoom,
+                "chromsizes": chromsizes.to_pairs(),
+                **fields,
+            }
+        )
 
     @property
     def ladder(self) -> Ladder:
@@ -278,24 +320,10 @@ class TilesetInfo(DatasetInfo):
             )
         return self.max_zoom + 1
 
-    def resolution_for(self, z: int) -> float:
+    def resolution_for(self, z: int) -> int:
         """Base pairs per bin at zoom index ``z``.
 
-        Absorbs both serializations so callers never branch on
-        ``"resolutions" in info``. This retires the sniff at
-        ``cooler.generate_tiles:660``, the four separate ladder implementations,
-        and ``sequence_logos``' ``del tsinfo["max_zoom"]`` conversion hack.
-
-        The implicit formula is exactly ``cooler.py:675``, which already sits in
-        the ``else`` branch of the very sniff this replaces::
-
-            resolution = (max_width / 2**z) / tile_size
-
-        Raises
-        ------
-        TileOutOfBounds
-            If ``z`` is outside the ladder. Note the current cooler behavior is
-            to skip such tiles silently; the boundary decides which to surface.
+        Raises :class:`TileOutOfBounds` if ``z`` is outside the ladder.
         """
         if z < 0:
             raise TileOutOfBounds(f"negative zoom level {z}")
@@ -306,51 +334,60 @@ class TilesetInfo(DatasetInfo):
                 raise TileOutOfBounds(
                     f"zoom {z} exceeds ladder of {len(ladder)} resolutions"
                 )
-            return float(ladder[z])
+            return ladder[z]
 
         if self.max_width is None or self.tile_size is None:
             raise ValueError(
-                "implicit ladder needs both max_width and tile_size; got "
+                "Quadtree zoom ladder needs both max_width and tile_size; got "
                 f"max_width={self.max_width}, tile_size={self.tile_size}"
             )
         if self.max_zoom is not None and z > self.max_zoom:
             raise TileOutOfBounds(f"zoom {z} exceeds max_zoom {self.max_zoom}")
 
-        # TODO: decide rounding. This is exact for power-of-two ladders (every
-        # current implicit tileset) but goes fractional if max_width is not a
-        # multiple of tile_size * 2**z.
-        return (self.max_width / 2**z) / self.tile_size
+        # Check that a whole number resolution is derived.
+        binsize, remainder = divmod(self.max_width, 2**z * self.tile_size)
+        if remainder:
+            raise ValueError(
+                "Malformed quadtree - "
+                f"zoom {z} does not divide the coordinate space evenly: "
+                f"max_width {self.max_width} / 2**{z} is not a multiple of "
+                f"tile_size {self.tile_size}"
+            )
+        return binsize
 
-    def tile_span(self, z: int) -> float:
-        """Width of one tile at zoom ``z``, in coordinate-space units.
+    def tile_width(self, z: int) -> int:
+        """Width of one tile at zoom ``z``, in coordinate-space units (bp).
 
-        Replaces the ``tsinfo["max_width"] / 2**z`` idiom inlined in bedfile,
-        bedpe, gff, vcf, bam and tabix.
+        Raises :class:`TileOutOfBounds` if ``z`` is outside the ladder.
         """
-        if self.max_width is None:
-            raise ValueError("tileset declares no max_width")
-        return self.max_width / 2**z
+        if self.tile_size is None:
+            raise ValueError("tileset declares no tile_size")
+        return self.resolution_for(z) * self.tile_size
+
+    @cached_property
+    def coordinate_system(self) -> Chromsizes | None:
+        """The ``chromsizes``; ``None`` for non-genomic tilesets."""
+        if self.chromsizes is None:
+            return None
+        return Chromsizes.from_pairs(self.chromsizes)
 
     def canvas(self, z: int):
-        """The uniform lattice at zoom ``z``.
+        """The scale mapping for the grid of tiles at zoom ``z``.
 
-        The entry point for all grid geometry: a :class:`~clodius.core.grid.Canvas`
-        knows its bin size, how many bins and tiles it holds, inverts tile
-        positions back to genomic intervals, and hands out per-tile windows.
-        Callers get the zoom-level arithmetic done once instead of recomputing
-        ``max_width / 2**z``.
+        The canvas knows its bin size, tile size, how many bins and tiles it
+        holds, and can invert tile positions into genomic intervals.
 
-        Needs ``tile_size`` and ``max_width`` even on an explicit ladder, where
-        ``resolutions`` alone fixes the bin sizes: those two describe the
-        *geometry* (how wide a tile is, how far the lattice extends) rather than
-        the ladder. A tileset that does not advertise them natively should
-        derive them -- see ``cooler_v2``, where tile size is a format constant
-        and the extent follows from the coarsest resolution.
+        Raises :class:`TileOutOfBounds` if ``z`` is outside the ladder.
 
-        Raises
-        ------
-        TileOutOfBounds
-            If ``z`` lies outside the resolution ladder.
+        Notes
+        -----
+        For a quadtree ladder, the canvas has a fixed size across all zoom
+        levels, determined by the amount of padding needed to cover the
+        coordinate system at the highest resolution.
+
+        For an explicit ladder, the canvas size is calculated at each zoom
+        level independently and depends on the padding required to cover the
+        coordinate system for each tile size in the ladder.
         """
         if self.tile_size is None:
             raise ValueError("tileset declares no tile_size")
@@ -358,44 +395,23 @@ class TilesetInfo(DatasetInfo):
         binsize = self.resolution_for(z)
 
         if self.ladder is Ladder.EXPLICIT:
-            # For an explicit ladder the extent is a property of the *zoom*, not
-            # of the tileset: it is however many tiles are needed to cover the
-            # genome at this resolution. Only a power-of-two ladder (what
-            # `cooler zoomify` emits) makes it invariant, because such a ladder
-            # is a quadtree. On the 4DN standard set it varies non-monotonically
-            # -- 5.12 Gb, 3.84, 3.20, 3.33, ... -- so there is no tileset-level
-            # value to inherit, and inheriting one from the coarsest level
-            # inflates n_tiles at every finer zoom.
             if self.coordinate_system is None:
                 raise ValueError(
-                    "an explicit ladder needs chromsizes to derive its extent"
+                    "An explicit ladder needs chromsizes to derive its extent"
                 )
             tile_span = binsize * self.tile_size
             extent = math.ceil(self.coordinate_system.total_length / tile_span)
             extent = int(extent * tile_span)
         else:
             # An implicit ladder is a quadtree: max_width is tile_size * 2**max_zoom
-            # and is genuinely invariant, so the tileset-level value stands.
             if self.max_width is None:
-                raise ValueError("tileset declares no max_width")
+                raise ValueError("Quadtree tileset declares no max_width")
             extent = self.max_width
 
-        return Canvas(
+        return TileCanvas(
             z=z,
             binsize=binsize,
             tile_size=self.tile_size,
             max_width=extent,
             chromsizes=self.coordinate_system,
         )
-
-    @cached_property
-    def coordinate_system(self) -> Chromsizes | None:
-        """The wire ``chromsizes`` field as a :class:`Chromsizes`.
-
-        Cached because ``canvas()`` is called per tile and building this
-        recomputes cumulative offsets. ``None`` for non-genomic tilesets, which
-        have no chromosomes to invert tile positions into.
-        """
-        if self.chromsizes is None:
-            return None
-        return Chromsizes.from_pairs(self.chromsizes)

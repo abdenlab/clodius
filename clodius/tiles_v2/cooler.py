@@ -6,14 +6,13 @@ import cooler
 import h5py
 import numpy as np
 
-from clodius.core.coords import (
-    Chromsizes,
-    GenomicRange,
-    reconcile_sequential_2d,
-)
+from clodius.core.coords import Chromsizes, GenomicRange
 from clodius.core.errors import TileError
-from clodius.core.payloads import DenseTile, TileKind
-from clodius.core.policies import DEFAULT_POLICY, TilePolicy, GridPolicy
+from clodius.core.tile import DenseTile, DenseTilePayload
+from clodius.core.policies import (
+    TilePolicy,
+    reconcile_2d,
+)
 from clodius.core.tileid import ModifierSpec, TileId
 from clodius.core.tileset import BaseTileset, TilesetInfo
 
@@ -85,41 +84,69 @@ def fetch_block(
         # Past the last chromosome: padding, not missing data. Same contract as
         # the 1D path -- the caller supplies a correctly shaped NaN block.
         return np.full(shape, np.nan, dtype=np.float32)
+    if 0 in shape:
+        return np.empty(shape, dtype=np.float32)
 
-    block = clr.matrix(balance=balance).fetch(row.as_tuple(), col.as_tuple())
+    block = clr.matrix(balance=balance).fetch(
+        _query(row, binsize), _query(col, binsize)
+    )
     return block.astype(np.float32)
+
+
+def _first_bin(interval: GenomicRange, binsize: float) -> int:
+    """Source bin whose start is nearest the tile start.
+
+    Tile edges fall wherever the concatenated coordinate space puts them. From
+    the second chromosome on, the source and target bin grids are out of phase.
+    The phase shift is constant within a chromosome. We can't remove the shift
+    without re-aggregating or interpolating, but we can round the tile start
+    edge to the nearest source bin boundary to limit the shift to within
+    +/-0.5 of a bin instead of systematically right-shifted up to +1 bin.
+    """
+    # floor(x + 0.5) rather than round, which rounds halves to even.
+    lo = math.floor(interval.start / binsize + 0.5)
+    last = math.ceil(interval.end / binsize)
+    if interval.end > interval.start and lo >= last:
+        return last - 1
+    return lo
+
+
+def _query(interval: GenomicRange, binsize: float) -> tuple[str, int, int]:
+    """Fetch the canvas interval, snapped to the nearest source bin start."""
+    name, _, end = interval.as_tuple()
+    return (name, int(_first_bin(interval, binsize) * binsize), end)
 
 
 def _bin_count(interval: GenomicRange, binsize: float) -> int:
     """Bins a fetch of this interval returns.
 
-    Outward rounding -- ``floor(start / b)`` to ``ceil(end / b)`` -- because
-    cooler returns every bin that *overlaps* the region. That is one more than
-    ``ceil(span / b)`` whenever the interval starts mid-bin, and getting it wrong
-    makes blocks in the same strip disagree on shape. Same formula as
-    the chromosome-relative bin slice ``floor(start/b) .. ceil(end/b)``.
+    From the nearest bin boundary at or near ``start`` out to the last bin
+    overlapping ``end``, because cooler returns every bin overlapping the range.
+    Blocks in the same strip must agree on shape, so this and :func:`_query`
+    have to describe the same window.
     """
-    return math.ceil(interval.end / binsize) - math.floor(
-        interval.start / binsize
+    return max(
+        0,
+        math.ceil(interval.end / binsize) - _first_bin(interval, binsize),
     )
 
 
 class CoolerTileset(BaseTileset):
     """An .mcool served as a 2D matrix tileset."""
 
-    datatype = "matrix"
     ndim = 2
-    tile_kind = TileKind.DENSE
+    datatype = "matrix"
     modifiers = COOLER_TRANSFORM
     options = frozenset()
 
-    grid_policy = GridPolicy.SEQUENTIAL
-
-    def __init__(self, path, policy: TilePolicy = DEFAULT_POLICY):
+    def __init__(
+        self, path, policy: TilePolicy | None = None, tile_size: int = TILE_SIZE
+    ):
         self._path = path
         self._file = None
-        self._policy = policy
         self._info = None
+        self.policy = policy or TilePolicy()
+        self.tile_size = tile_size
 
     # --- resource lifetime --------------------------------------------------
 
@@ -147,12 +174,6 @@ class CoolerTileset(BaseTileset):
             tuple(clr.chromnames), tuple(int(v) for v in clr.chromsizes.values)
         )
 
-    # --- the protocol -------------------------------------------------------
-
-    @property
-    def policy(self) -> TilePolicy:
-        return self._policy
-
     @property
     def resolutions(self) -> tuple[int, ...]:
         return tuple(sorted(int(r) for r in self.file["resolutions"].keys()))
@@ -162,7 +183,7 @@ class CoolerTileset(BaseTileset):
             self._info = self._build_info()
         return self._info
 
-    def tiles(self, ids):
+    def tiles(self, ids, options=None) -> list[tuple[TileId, DenseTilePayload]]:
         return [(tid, self._tile(tid)) for tid in ids]
 
     # --- internals ----------------------------------------------------------
@@ -233,7 +254,7 @@ class CoolerTileset(BaseTileset):
         ]
 
         # Reconcile the blocks into a single 2D array.
-        out = reconcile_sequential_2d(
+        out = reconcile_2d(
             blocks,
             row_spans=[iv.end - iv.start for iv in row_intervals],
             col_spans=[iv.end - iv.start for iv in col_intervals],

@@ -1,25 +1,21 @@
 """Tile identifier parsing.
 
-One parser, replacing the ~12 ad-hoc ``tile_id.split(".")`` sites.
-
-Grammar (see _scratch/clodius-contracts-and-interface.md section 1.1)::
+Grammar::
 
     tile_id  := uid "." z ( "." coord )* ( "." modifier )? ( "," option )*
     option   := key ":" value
 
-``uid`` must round-trip verbatim into the response key -- the client matches
-responses to requests by exact string. :attr:`TileId.raw` preserves it, which is
-what lets us retire ``cooler``'s ``transform_id_to_original_id`` bookkeeping.
+``uid`` must round-trip verbatim into the response key: the client matches
+responses to requests by exact string.
 
-``z`` is an index into the tileset's resolution ladder, coarsest first. It means
-the same thing for every tileset; only the ladder's *serialization* varies. See
-:mod:`clodius.core.info`.
+``z`` is an index into the tileset's resolution ladder, coarsest first.
+
+Modifiers are determined by a ``ModifierSpec``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-
 from clodius.core.errors import (
     MalformedTileId,
     UnsupportedModifier,
@@ -27,16 +23,20 @@ from clodius.core.errors import (
 )
 
 # Separator between the dotted tile position and any ``key:value`` options.
-# Mirrors ``clodius.utils.TILE_OPTIONS_CHAR``; kept here so the parser is
-# self-contained.
 TILE_OPTIONS_CHAR = ","
+
+
+def _is_int(text: str) -> bool:
+    """Whether a dotted part is a coordinate rather than a modifier."""
+    return text.isdigit() or (text[:1] == "-" and text[1:].isdigit())
 
 
 @dataclass(frozen=True, slots=True)
 class ModifierSpec:
     """What a tileset accepts in the modifier slot after the coordinates.
 
-    The slot is type-specific and overloaded across the codebase:
+    A spec lets a tileset declare what modifers it accepts when a tile is
+    requested. The slot is type-specific and overloaded across the codebase:
 
     ==========  =========================================  ===========
     tileset     values                                     meaning
@@ -44,18 +44,8 @@ class ModifierSpec:
     bigwig      mean/min/max/std/sum                       aggregation
     bigwig      minMax/whisker                             range mode (changes dimensionality!)
     bigbed      significant                                range mode
-    cooler      default/None/<column name>                 transform (open set)
+    cooler      default/None/<column name>                 transform
     ==========  =========================================  ===========
-
-    Declaring it as data is what lets a server ask the tileset what it accepts
-    instead of hardcoding that bigwig means aggregation and cooler means
-    normalization.
-
-    Closed vs open sets are a real distinction, not a convenience. bigwig's
-    modifiers are pybigtools statistics -- a fixed vocabulary. Cooler's are the
-    *name of a bin table column*, which is per-file and unbounded, so the spec
-    can only check that the modifier is well-formed; whether the column exists
-    is a question for the instance, not the grammar.
     """
 
     values: frozenset[str]
@@ -63,7 +53,7 @@ class ModifierSpec:
     # Free-form label for what the slot signifies ('aggregation', 'transform', ...).
     kind: str = "modifier"
     # When set, `values` lists the recognized sentinels but any other non-empty
-    # string is accepted too. The tileset validates meaning at fetch time.
+    # string is accepted too and the tileset validates meaning at fetch time.
     allow_unknown: bool = False
 
     def validate(self, value: str | None) -> str | None:
@@ -85,7 +75,7 @@ class ModifierSpec:
 class TileId:
     """A parsed tile identifier.
 
-    Immutable and hashable so it can key caches and dedupe batches directly.
+    Immutable and hashable so it can be used as a key.
     """
 
     uid: str
@@ -119,19 +109,22 @@ class TileId:
     ) -> TileId:
         """Parse ``tile_id`` against a tileset's declared shape.
 
-        ``ndim`` and ``modifiers`` are required to disambiguate the positional
-        slots -- which is precisely why parsing cannot be a free function and has
-        to sit next to the declarative capability data.
-
         Parameters
         ----------
         ndim
-            Number of coordinate slots after ``z`` (1 for vectors, 2 for matrices).
+            Number of coordinate slots after ``z``: 1 for vectors and 1D
+            annotations, 2 for matrices and 2D annotations.
         modifiers
             What the trailing modifier slot may contain, if anything.
         options
             Recognized ``,key:value`` keys. ``None`` accepts any; an empty set
             rejects all.
+
+        Notes
+        -----
+        ``ndim`` and ``modifiers`` are required to disambiguate coordinate
+        slots from modifiers: with the arity fixed, a trailing non-numeric part
+        is unambiguously the modifier.
         """
         head, _, opt_str = tile_id.partition(TILE_OPTIONS_CHAR)
 
@@ -151,20 +144,20 @@ class TileId:
                 parsed_options.append((key, value))
 
         parts = head.split(".")
+        if ndim < 1:
+            raise ValueError(f"ndim must be at least 1, got {ndim}")
+
         expected = 1 + 1 + ndim  # uid + z + coords
-        if len(parts) < expected:
+        if len(parts) < expected or not all(
+            _is_int(p) for p in parts[1:expected]
+        ):
             raise MalformedTileId(
-                f"{tile_id!r} has {len(parts)} dotted parts; a {ndim}D tile "
-                f"needs at least {expected} (uid.z{'.pos' * ndim})"
+                f"{tile_id!r} does not match uid.z{'.pos' * ndim}; got "
+                f"{len(parts)} dotted parts ({parts!r})"
             )
 
         uid = parts[0]
-        try:
-            numbers = [int(p) for p in parts[1:expected]]
-        except ValueError as exc:
-            raise MalformedTileId(
-                f"non-integer position in {tile_id!r}: {exc}"
-            ) from exc
+        numbers = [int(p) for p in parts[1:expected]]
 
         modifier_parts = parts[expected:]
         if len(modifier_parts) > 1:

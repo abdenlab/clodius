@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 import os
-from typing import ClassVar, Sequence
+from typing import Sequence
 
 import oxbow as ox
 import polars as pl
 
 from clodius.core.coords import Chromsizes, GenomicRange
 from clodius.core.errors import TilesetUnavailable
-from clodius.core.payloads import BedlikeTile, RegionRow, TileKind
-from clodius.core.policies import DEFAULT_POLICY, DensityPolicy, TilePolicy
+from clodius.core.tile import AnnotationRecord
+from clodius.core.policies import TilePolicy
 from clodius.core.tileid import TileId
-from clodius.core.tileset import BaseTileset, TilesetInfo, quadtree_depth
+from clodius.core.tileset import BaseTileset, TilesetInfo
 
-# Bases per bin at the deepest zoom is 1, so a tile there is TILE_SIZE bases.
 TILE_SIZE = 1024
 
 # Seed for the row digest. Fixed so that importance is reproducible across
@@ -83,7 +82,7 @@ def overlap_predicate(
     return expr
 
 
-def to_tile_record(row: dict, offsets: dict[str, int]) -> BedlikeTile:
+def to_tile_record(row: dict, offsets: dict[str, int]) -> AnnotationRecord:
     """One materialized row as the client's bedlike shape."""
     chrom, start, end = row["chrom"], row["start"], row["end"]
     offset = offsets[chrom]
@@ -123,33 +122,32 @@ class BedTileset(BaseTileset):
         one stored elsewhere. With an index, a tile reads just its own byte
         ranges; without one, every tile scans the file.
     policy :
-        Limits. ``max_entries_per_tile`` caps records per tile;
-        ``max_unindexed_filesize`` refuses to scan an unindexed file above a
+        Limits. ``max_records`` caps records per tile;
+        ``max_scan_bytes`` refuses to scan an unindexed file above a
         size.
     """
 
-    datatype: ClassVar[str] = "bedlike"
-    ndim: ClassVar[int] = 1
-    tile_kind: ClassVar[TileKind] = TileKind.BEDLIKE
+    ndim = 1
+    datatype = "bedlike"
     modifiers = None
     options = frozenset()
-
-    density_policy: ClassVar[DensityPolicy] = DensityPolicy.SUBSAMPLED
 
     def __init__(
         self,
         path: str | os.PathLike,
         chromsizes: Chromsizes,
         index_path: str | os.PathLike | None = None,
-        policy: TilePolicy = DEFAULT_POLICY,
+        policy: TilePolicy | None = None,
+        tile_size: int = TILE_SIZE,
     ):
         self._path = os.fspath(path)
         self._index_path = os.fspath(index_path) if index_path else None
         self._is_indexed = self._index_path is not None or _has_sibling_index(
             self._path
         )
+        self.policy = policy or TilePolicy()
+        self.tile_size = tile_size
         self._chromsizes = chromsizes
-        self._policy = policy
         self._info = self._build_info()
         self._checked_size = False
 
@@ -157,17 +155,15 @@ class BedTileset(BaseTileset):
     def is_indexed(self) -> bool:
         return self._is_indexed
 
-    @property
-    def policy(self) -> TilePolicy:
-        return self._policy
-
     def chromsizes(self) -> Chromsizes:
         return self._chromsizes
 
     def info(self) -> TilesetInfo:
         return self._info
 
-    def tiles(self, ids: Sequence[TileId]):
+    def tiles(
+        self, ids: Sequence[TileId], options=None
+    ) -> list[tuple[TileId, list[AnnotationRecord]]]:
         return [(tid, self._tile(tid)) for tid in ids]
 
     def close(self) -> None:
@@ -178,7 +174,9 @@ class BedTileset(BaseTileset):
 
     # --- ProvidesRegions ----------------------------------------------------
 
-    def regions(self, offset: int, limit: int) -> tuple[list[RegionRow], bool]:
+    def regions(
+        self, offset: int, limit: int
+    ) -> tuple[list[AnnotationRecord], bool]:
         """A page of records in file order, plus whether more follow."""
         # Reads ``limit + 1`` rows to answer "is there a next page" without a
         # count. ``n_rows`` pushes down into the reader, so this touches only the
@@ -208,16 +206,7 @@ class BedTileset(BaseTileset):
     # --- internals ----------------------------------------------------------
 
     def _build_info(self) -> TilesetInfo:
-        total = self._chromsizes.total_length
-        max_zoom = quadtree_depth(total, TILE_SIZE)
-        return TilesetInfo(
-            min_pos=[0],
-            max_pos=[total],
-            max_width=TILE_SIZE * 2**max_zoom,
-            tile_size=TILE_SIZE,
-            max_zoom=max_zoom,
-            chromsizes=self._chromsizes.to_pairs(),
-        )
+        return TilesetInfo.quadtree(self._chromsizes, self.tile_size)
 
     def _digest_expr(self) -> pl.Expr:
         """A stable 64-bit digest of the record's own bytes.
@@ -234,7 +223,7 @@ class BedTileset(BaseTileset):
         """Refuse to scan an unindexed file above the policy ceiling."""
         if self._is_indexed or self._checked_size:
             return
-        limit = self._policy.max_unindexed_filesize
+        limit = self.policy.max_scan_bytes
         size = os.path.getsize(self._path)
         if limit is not None and size > limit:
             raise TilesetUnavailable(
@@ -253,7 +242,7 @@ class BedTileset(BaseTileset):
             index=self._index_path,
         ).pl(lazy=True)
 
-    def _tile(self, tid: TileId) -> list[BedlikeTile]:
+    def _tile(self, tid: TileId) -> list[AnnotationRecord]:
         ranges = list(self._info.canvas(tid.z).invert(tid.pos[0]))
 
         if self._is_indexed:
@@ -274,7 +263,7 @@ class BedTileset(BaseTileset):
 
         # Bounded-memory downsampling: `top_k` keeps a heap of `cap` rows, so
         # peak memory does not depend on how many records the tile covers.
-        cap = self._policy.max_entries_per_tile
+        cap = self.policy.max_records
         if cap is not None:
             frame = frame.top_k(cap, by="_digest")
 

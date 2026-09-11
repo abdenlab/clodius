@@ -18,7 +18,7 @@ from clodius.core.coords import (
     GenomicRange,
     natsorted,
 )
-from clodius.core.tileset import quadtree_depth
+from clodius.core.tileset import _quadtree_depth as quadtree_depth
 from clodius.tiles.bigwig import TILE_SIZE as BIGWIG_TILE_SIZE
 from clodius.tiles.bigwig import abs2genomic as abs2genomic_bigwig
 from clodius.tiles.bigwig import get_quadtree_depth as quadtree_depth_bigwig
@@ -37,8 +37,19 @@ def as_tuples(intervals):
 
 
 def legacy_as_tuples(gen):
-    """Normalize legacy output, which leaks numpy scalars and floats."""
-    return [(int(cid), int(start), int(end)) for cid, start, end in gen]
+    """Normalize legacy output, which leaks numpy scalars and floats.
+
+    Zero-length intervals are dropped. Legacy derives its last chromosome index
+    from the span's *exclusive* end, so an end landing exactly on a boundary --
+    including the end of the genome -- trails an empty interval, flagged
+    out-of-bounds in the whole-genome case. That is the second intentional
+    difference, after the int cast.
+    """
+    return [
+        (int(cid), int(start), int(end))
+        for cid, start, end in gen
+        if int(end) > int(start)
+    ]
 
 
 # --- basic semantics --------------------------------------------------------
@@ -85,13 +96,28 @@ def test_past_end_is_flagged_not_dropped():
     assert ivs[-1].cid == len(cs)
 
 
-def test_whole_genome_yields_zero_length_tail():
+def test_whole_genome_has_no_tail():
+    """A span ending exactly at the end of the genome is entirely in bounds.
+
+    Legacy trails an empty out-of-bounds interval here, because it locates the
+    last chromosome from the exclusive end.
+    """
     cs = Chromsizes.from_pairs(TINY)
     ivs = list(cs.invert((0, cs.total_length)))
 
-    assert ivs[-1].is_out_of_bounds
-    assert (ivs[-1].start, ivs[-1].end) == (0, 0)
-    assert not any(iv.is_out_of_bounds for iv in ivs[:-1])
+    assert len(ivs) == len(cs)
+    assert not any(iv.is_out_of_bounds for iv in ivs)
+    assert as_tuples(ivs)[-1] == (len(cs) - 1, 0, TINY[-1][1])
+
+
+def test_boundary_aligned_end_stops_short():
+    cs = Chromsizes.from_pairs(TINY)
+    assert as_tuples(cs.invert((0, TINY[0][1]))) == [(0, 0, TINY[0][1])]
+
+
+def test_empty_span_covers_nothing():
+    cs = Chromsizes.from_pairs(TINY)
+    assert list(cs.invert((50, 50))) == []
 
 
 def test_entirely_past_end():

@@ -1,71 +1,16 @@
-"""bed2ddb (.multires.db) rewritten against clodius.core.
-
-The precomputed counterpart to ``tiles_v2/bedpe.py``: same records, same two
-renderings, but aggregated ahead of time into SQLite. Split the same way --
-:class:`Bed2ddbTileset` for rectangles, :class:`Bed2ddbLinksTileset` for links --
-so the selection rule stays a property of the type.
-
-Three things make it behave differently from BEDPE.
-
-**Density is STRATIFIED, not SUBSAMPLED.** Aggregation assigns every record a
-``zoomLevel``, and a tile returns records with ``zoomLevel <= z``. Zoom is a
-priority threshold, so density is bounded by construction and there is no
-request-time thinning, no cap, and no ``importance`` to invent -- the stored
-``importance`` is the real ranking that decided the zoom levels. This is the
-model the SUBSAMPLED types are a degraded copy of.
-
-**Both anchors are indexed.** ``position_index`` is an R-tree over
-``(rFromX, rToX, rFromY, rToY)``, so unlike a tabix'd BEDPE -- where only anchor
-1 is reachable -- every selection rule here is an indexed query, including
-``HULL``. See :meth:`Bed2ddbLinksTileset._where`.
-
-**The geometry comes from the file.** ``tile_size``, ``max_zoom`` and
-``max_width`` are columns in the ``tileset_info`` table rather than derived from
-chromsizes, and ``chromsizes`` itself is stored. Nothing is passed at
-construction.
-
-Fixed here
-----------
-
-**The 1D union was being thrown away.** ``get_1d_tiles`` issues::
-
-    SELECT ... WHERE rToX >= start AND rFromX <= end
-    UNION
-    SELECT ... WHERE rToY >= start AND rFromY <= end
-
-and then post-filters in Python with ``if x_start < tile_x_end and x_end >=
-tile_x_start`` -- testing x only. Every record the y branch retrieves is
-discarded, so the stated semantics (either anchor) collapses to anchor 1 only,
-and half the query is dead work. Verified on
-``test/sample_data/hiccups_loops_short.txt.multires.db``: a loop whose y anchor
-lies squarely inside tile 6797 at z=14, with its x anchor outside, is absent
-from the result.
-
-That bug is why ``EITHER`` rather than ``ANCHOR1`` is the default here: the
-either-anchor reading is what the SQL always intended.
-
-Deliberately kept
------------------
-
-``min_pos`` is ``[1, 1]``, matching legacy and ``beddb``, where the BEDPE
-prototypes use ``[0, 0]``. The value is one-based for no reason anyone recorded,
-but it ships with precomputed files and is not ours to reinterpret.
-"""
-
 from __future__ import annotations
 
 import os
-from typing import ClassVar, Iterator, Sequence
+from typing import Iterator, Sequence
 
 import apsw
 import sosqlite
 
 from clodius.core.coords import Chromsizes
-from clodius.core.payloads import Bedlike2DTile, TileKind
-from clodius.core.policies import DEFAULT_POLICY, DensityPolicy, TilePolicy
+from clodius.core.tile import Annotation2DRecord
+from clodius.core.policies import TilePolicy, LinkPolicy
 from clodius.core.tileid import TileId
 from clodius.core.tileset import BaseTileset, TilesetInfo
-from clodius.tiles_v2.bedpe import LinkPolicy
 
 # A VFS that opens through smart_open, so a tileset can live on S3/HTTP rather
 # than the local filesystem. Module-level because registering it is global and
@@ -76,13 +21,13 @@ _VFS = sosqlite.SmartOpenVFS(name="so-vfs-v2")
 _COLUMNS = "fromX, toX, fromY, toY, chrOffset, importance, fields, uid"
 
 
-def to_bedlike2d(row: tuple) -> Bedlike2DTile:
+def to_bedlike2d(row: tuple) -> Annotation2DRecord:
     """One database row as the client's 2D bedlike shape.
 
     ``uid`` arrives as ``bytes`` or ``str`` depending on how the file was
     written, so it is normalized here rather than at four call sites.
 
-    Note this is :class:`Bedlike2DTile`, not the ``PairedTile`` the BEDPE
+    Note this is :class:`Annotation2DRecord`, not the ``Annotation2DRecord`` the BEDPE
     tilesets emit: the format stores a single ``chrOffset`` (anchor 1's) and
     never records anchor 2's chromosome, so ``yChrOffset`` cannot be filled in
     honestly. See the class docstring in clodius.core.payloads.
@@ -115,23 +60,22 @@ def overlaps(prefix: str, lo: float, hi: float) -> str:
 class _Bed2ddbBase(BaseTileset):
     """Shared connection handling, geometry and row mapping."""
 
-    datatype: ClassVar[str] = "bedlike"
-    tile_kind: ClassVar[TileKind] = TileKind.BEDLIKE_2D
     modifiers = None
     options = frozenset()
 
     # No request-time thinning: the zoom level IS the density control.
-    density_policy: ClassVar[DensityPolicy] = DensityPolicy.STRATIFIED
 
     def __init__(
         self,
         path: str | os.PathLike,
-        policy: TilePolicy = DEFAULT_POLICY,
+        policy: TilePolicy | None = None,
+        tile_size: int | None = None,
     ):
         self._path = os.fspath(path)
-        self._policy = policy
         self._conn: apsw.Connection | None = None
         self._info = self._build_info()
+        self.policy = policy or TilePolicy()
+        self.tile_size = tile_size or self._info.tile_size
 
     # --- resource lifetime --------------------------------------------------
 
@@ -154,19 +98,13 @@ class _Bed2ddbBase(BaseTileset):
             self._conn.close()
             self._conn = None
 
-    # --- the protocol -------------------------------------------------------
-
-    @property
-    def policy(self) -> TilePolicy:
-        return self._policy
-
     def chromsizes(self) -> Chromsizes:
         return self._info.coordinate_system
 
     def info(self) -> TilesetInfo:
         return self._info
 
-    def tiles(self, ids: Sequence[TileId]):
+    def tiles(self, ids: Sequence[TileId], options=None):
         return [(tid, self._tile(tid)) for tid in ids]
 
     # --- what the subclasses supply -----------------------------------------
@@ -178,7 +116,9 @@ class _Bed2ddbBase(BaseTileset):
     # --- internals ----------------------------------------------------------
 
     def _build_info(self) -> TilesetInfo:
-        row = self.conn.cursor().execute("SELECT * FROM tileset_info").fetchone()
+        row = (
+            self.conn.cursor().execute("SELECT * FROM tileset_info").fetchone()
+        )
         (
             _zoom_step,
             max_length,
@@ -188,7 +128,7 @@ class _Bed2ddbBase(BaseTileset):
             tile_size,
             max_zoom,
             max_width,
-            *_
+            *_,
         ) = row
 
         names = tuple(chrom_names.split("\t"))
@@ -213,7 +153,7 @@ class _Bed2ddbBase(BaseTileset):
             f"WHERE intervals.id = position_index.id AND {where}"
         )
 
-    def _tile(self, tid: TileId) -> list[Bedlike2DTile]:
+    def _tile(self, tid: TileId) -> list[Annotation2DRecord]:
         canvas = self._info.canvas(tid.z)
         rows = self._query(self._where(canvas, tid))
 
@@ -234,7 +174,8 @@ class Bed2ddbTileset(_Bed2ddbBase):
     R-tree box query rather than a seek plus a filter.
     """
 
-    ndim: ClassVar[int] = 2
+    ndim = 2
+    datatype = "2d-rectangle-domains"
 
     def _where(self, canvas, tid: TileId) -> str:
         x0, x1 = canvas.tile_span(tid.pos[0])
@@ -261,7 +202,8 @@ class Bed2ddbLinksTileset(_Bed2ddbBase):
     including ``HULL``, because the R-tree covers both anchors.
     """
 
-    ndim: ClassVar[int] = 1
+    ndim = 1
+    datatype = "bedlike"
 
     def __init__(
         self, *args, link_policy: LinkPolicy = LinkPolicy.EITHER, **kwargs
@@ -299,17 +241,16 @@ class Bed2ddbLinksTileset(_Bed2ddbBase):
         spans_xy = f"rFromX < {lo} AND rToY > {hi}"
         spans_yx = f"rFromY < {lo} AND rToX > {hi}"
         return (
-            f"{zoom} AND "
-            f"(({on_x}) OR ({on_y}) OR ({spans_xy}) OR ({spans_yx}))"
+            f"{zoom} AND (({on_x}) OR ({on_y}) OR ({spans_xy}) OR ({spans_yx}))"
         )
 
 
 # --- Notes ------------------------------------------------------------------
 #
-# 1. No `max_entries_per_tile`. STRATIFIED means the aggregation step already
+# 1. No `max_records`. STRATIFIED means the aggregation step already
 #    bounded tile density by assigning zoom levels, so capping here would drop
 #    records the file went to the trouble of ranking. `TilePolicy` is still
-#    accepted for uniformity, and `max_unindexed_filesize` is irrelevant since
+#    accepted for uniformity, and `max_scan_bytes` is irrelevant since
 #    everything is indexed.
 #
 # 2. `importance` is read from the file rather than synthesized. It is the value
@@ -337,3 +278,10 @@ class Bed2ddbLinksTileset(_Bed2ddbBase):
 # 6. `assembly` is passed through to tileset_info because the file carries it
 #    and legacy emits it. It is the only v2 tileset that can: every other type
 #    infers coordinates from chromsizes handed in at construction.
+#
+#
+#  Deliberately kept
+# -----------------
+# ``min_pos`` is ``[1, 1]``, matching legacy and ``beddb``, where the BEDPE
+# prototypes use ``[0, 0]``. The value is one-based for no reason anyone recorded,
+# but it ships with precomputed files and is not ours to reinterpret.

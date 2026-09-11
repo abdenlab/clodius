@@ -1,21 +1,4 @@
-"""Multivec (.mv5) rewritten against clodius.core.
-
-The third prototype, and the first to combine an **explicit ladder** with the
-**SEQUENTIAL** policy -- bigwig is sequential with an implicit ladder, cooler is
-explicit with 2D blocks. It is also the first with a *shaped* payload: each bin
-carries a vector of per-row values, so a tile is ``(n_rows, tile_size)`` rather
-than a flat run.
-
-Two things it does differently from the other dense types, preserved here:
-
-- **Padding is zeros, not NaN.** Where bigwig fills the band past the last
-  chromosome with NaN (unmappable), multivec fills it with 0 (no signal). Both
-  are defensible; they are simply different, and the client draws them
-  differently.
-- **The payload omits ``size``/``min_value``/``max_value``**, emitting only
-  ``dense``/``dtype``/``shape``. That is ``DenseTileShapedPayload``; see
-  ``DenseTile.to_dict(stats=False)``.
-"""
+"""Multivec (.mv5)"""
 
 from __future__ import annotations
 
@@ -25,19 +8,33 @@ import math
 import h5py
 import numpy as np
 
-from clodius.core.coords import Chromsizes, GenomicRange, reconcile_sequential
-from clodius.core.payloads import DenseTile, TileKind
-from clodius.core.policies import DEFAULT_POLICY, TilePolicy, GridPolicy
+from clodius.core.coords import Chromsizes, GenomicRange
+from clodius.core.errors import MalformedTileId
+from clodius.core.tile import DenseTile, DenseTilePayload
+from clodius.core.policies import TilePolicy, reconcile
 from clodius.core.tileid import TileId
 from clodius.core.tileset import BaseTileset, TilesetInfo
 
 
 def bin_slice(start: int, end: int, binsize: int) -> tuple[int, int]:
-    """Chromosome-relative bin range covering ``[start, end)``.
+    """Chromosome-relative bin range answering ``[start, end)``.
 
-    Outward rounding, so the returned bins fully cover the interval.
+    The stored bins are fixed at each chromosome's start, while tile edges fall
+    wherever the concatenated coordinate space puts them, so from the second
+    chromosome on the two grids can be out of phase -- by a constant amount
+    within a chromosome. The shift cannot be removed without re-aggregating,
+    but rounding the start edge to the *nearest* stored bin keeps it within
+    half a bin rather than systematically displacing the data rightward by up
+    to a whole one. Same reasoning as ``cooler._first_bin``.
+
+    The end rounds outward, so the bins still cover the interval and a ragged
+    final bin is still offered to the grid reconciler.
     """
-    return (int(start) // binsize, math.ceil(int(end) / binsize))
+    lo = math.floor(int(start) / binsize + 0.5)
+    hi = math.ceil(int(end) / binsize)
+    if end > start and lo >= hi:
+        lo = hi - 1
+    return (lo, max(lo, hi))
 
 
 def fetch(
@@ -62,24 +59,22 @@ def fetch(
 class MultivecTileset(BaseTileset):
     """A multi-resolution multivec served as a stack of 1D vectors."""
 
-    datatype = "multivec"
     ndim = 1
-    tile_kind = TileKind.DENSE
+    datatype = "multivec"
     modifiers = None
     options = frozenset()
 
-    grid_policy = GridPolicy.SEQUENTIAL
-    # Floor, matching what the legacy module intends. Note the legacy
-    # accumulator never decrements after a drop, so once its drift crosses the
-    # threshold it drops from every subsequent chromosome -- an over-correction
-    # masked by a hard `[: shape[0]]` clamp. See the notes at the bottom.
-    grid_threshold = 1.0
-
-    def __init__(self, path, policy: TilePolicy = DEFAULT_POLICY):
+    def __init__(
+        self,
+        path,
+        policy: TilePolicy | None = None,
+        tile_size: int | None = None,
+    ):
         self._path = path
         self._file = None
-        self._policy = policy
         self._info = None
+        self.policy = policy or None
+        self.tile_size = tile_size or int(self.file["info"].attrs["tile-size"])
 
     # --- resource lifetime --------------------------------------------------
 
@@ -107,10 +102,6 @@ class MultivecTileset(BaseTileset):
     # --- the protocol -------------------------------------------------------
 
     @property
-    def policy(self) -> TilePolicy:
-        return self._policy
-
-    @property
     def resolutions(self) -> tuple[int, ...]:
         return tuple(
             sorted((int(r) for r in self.file["resolutions"]), reverse=True)
@@ -121,15 +112,18 @@ class MultivecTileset(BaseTileset):
             self._info = self._build_info()
         return self._info
 
-    def tiles(self, ids):
-        return [(tid, self._tile(tid)) for tid in ids]
+    def tiles(self, ids, options=None) -> list[tuple[TileId, DenseTilePayload]]:
+        # Parsed once, not per tile: it is one setting for the whole batch, and
+        # a bad one should fail the request rather than fifteen tiles over.
+        aggregation = parse_row_aggregation(options, self.info().shape[1])
+        return [(tid, self._tile(tid, aggregation)) for tid in ids]
 
     # --- internals ----------------------------------------------------------
 
     def _build_info(self) -> TilesetInfo:
         chromsizes = self.chromsizes()
         resolutions = self.resolutions
-        tile_size = int(self.file["info"].attrs["tile-size"])
+        tile_size = self.tile_size
         n_rows = self._n_rows(resolutions[0])
 
         info = TilesetInfo(
@@ -169,7 +163,7 @@ class MultivecTileset(BaseTileset):
                 out["row_infos"] = [_decode_json(r) for r in attrs["row_infos"]]
         return out
 
-    def _tile(self, tid: TileId):
+    def _tile(self, tid: TileId, aggregation=None) -> DenseTilePayload:
         info = self.info()
         canvas = info.canvas(tid.z)
         binsize = int(canvas.binsize)
@@ -181,16 +175,85 @@ class MultivecTileset(BaseTileset):
             for gr in canvas.invert(tid.pos[0])
         ]
 
-        dense = reconcile_sequential(
+        dense = reconcile(
             chunks,
             binsize,
             expected_bins=canvas.tile_size,
-            threshold=self.grid_threshold,
         )
-        # Transposed to (n_rows, tile_size): the client reads a stack of tracks,
-        # not a run of vectors.
-        stacked = dense.T
+        if aggregation is None:
+            # Transposed to (n_rows, tile_size): the client reads a stack of
+            # tracks, not a run of vectors.
+            stacked = dense.T
+        else:
+            # One output row per group, in the order asked for. `shape` has to
+            # describe what is actually sent -- the client unflattens with it --
+            # so it is (n_groups, tile_size) here while tileset_info keeps
+            # advertising the file's full row count.
+            groups, func = aggregation
+            stacked = np.stack(
+                [func(dense[:, rows], axis=1) for rows in groups]
+            )
         return DenseTile(stacked, shape=stacked.shape).to_dict(stats=False)
+
+
+# Row aggregation, the one per-request option in the wild -----------------------
+#
+# `HorizontalMultivecTrack` with `selectRowsAggregationMethod: "server"` sends
+# `{"aggGroups": [...], "aggFunc": "mean"}` in the POST body. `aggGroups` both
+# selects and *reorders* rows: an entry is one row index, or a list of indices
+# to combine into a single output row. The tile then has one row per group.
+#
+# Client-side aggregation -- the default -- sends nothing, and the tile is the
+# whole matrix.
+
+AGG_FUNCS = {
+    "sum": np.sum,
+    "mean": np.mean,
+    "median": np.median,
+    "std": np.std,
+    "var": np.var,
+    "min": np.amin,
+    "max": np.amax,
+}
+
+
+def parse_row_aggregation(options, n_rows: int):
+    """Validate ``{"aggGroups", "aggFunc"}`` against a tileset of ``n_rows``.
+
+    Returns ``(groups, func)`` or ``None`` when the request asks for no
+    aggregation. Raises :class:`MalformedTileId` -- a whole-batch failure,
+    since options arrive once for every tile in the request.
+    """
+    if not options:
+        return None
+    groups = options.get("aggGroups")
+    func_name = options.get("aggFunc")
+    if groups is None and func_name is None:
+        return None
+    if groups is None or func_name is None:
+        raise MalformedTileId(
+            "row aggregation needs both 'aggGroups' and 'aggFunc'; got "
+            f"{sorted(options)}"
+        )
+    if func_name not in AGG_FUNCS:
+        raise MalformedTileId(
+            f"{func_name!r} is not a valid aggFunc; expected one of "
+            f"{sorted(AGG_FUNCS)}"
+        )
+
+    normalized = []
+    for group in groups:
+        rows = [group] if isinstance(group, int) else list(group)
+        if not rows:
+            raise MalformedTileId("an aggGroups entry is empty")
+        for row in rows:
+            if not isinstance(row, int) or not 0 <= row < n_rows:
+                raise MalformedTileId(
+                    f"row {row!r} is out of range for a tileset of {n_rows} "
+                    "rows"
+                )
+        normalized.append(rows)
+    return normalized, AGG_FUNCS[func_name]
 
 
 def _decode_json(raw):
@@ -222,3 +285,11 @@ def _decode_json(raw):
 # 3. `shape` is emitted as `[tile_size, n_rows]` in tileset_info but the payload
 #    ships `(n_rows, tile_size)`. That transposition is in the legacy module
 #    too; it is confusing but load-bearing.
+#
+# Two things multivec does differently from the other dense types, preserved here:
+# - **Padding is zeros, not NaN.** Where bigwig fills the band past the last
+#   chromosome with NaN (unmappable), multivec fills it with 0 (no signal). Both
+#   are defensible; they are simply different, and the client draws them
+#   differently.
+# - **The payload omits ``size``/``min_value``/``max_value``**, emitting only
+#   ``dense``/``dtype``/``shape`` -- see ``DenseTile.to_dict(stats=False)``.

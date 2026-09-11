@@ -1,72 +1,71 @@
-"""Error hierarchy for the tile-serving layer.
+"""Errors for the tile-serving layer.
 
-The convention is **raise internally, translate at the server boundary**.
+Three groups::
 
-Library code raises these exceptions. The boundary layer (a HiGlass server, or
-the back-compat shims in ``clodius.tiles.*``) catches them and renders them into
-whichever ``{"error": ...}`` position the client expects for that endpoint:
+    TilesetError
+    |
+    +-- TilesetUnavailable           the dataset cannot be served at all
+    |
+    +-- MalformedTileId              the request is bad; raised before tiles()
+    |   +-- UnsupportedModifier
+    |   +-- UnsupportedOption
+    |
+    +-- TileError                    this one tile cannot be served
+        +-- TileOutOfBounds
+        +-- TileTooWide
+        +-- TileTooLarge
 
-- per-tile   -> ``[(tile_id, {"error": str(exc)}), ...]``
-- whole-info -> ``{"error": str(exc)}`` in place of a tileset info
+A :class:`TileError` is caught by ``tiles()``, converted into a dict, and
+returned as that tile's payload, leaving other tile responses intact.
 
-Doing the translation at the boundary rather than in each tileset module is what
-makes it structurally impossible to drop sibling tiles from a batch, which is the
-current bug in ``vcf.py:195``, ``bam.py:628`` and ``bam_pysam.py:359`` (they
-``return`` from inside the per-tile loop).
-
-See _scratch/clodius-contracts-and-interface.md sections 1.5 and 2.1.
+All other errors propagate to the server and poison the whole response.
 """
 
+from clodius.core.tile import ErrorTilePayload
 
-class TileError(Exception):
+
+class TilesetError(Exception):
     """Base for every error the tile layer raises deliberately."""
 
 
-class TilesetUnavailable(TileError):
+class TilesetUnavailable(TilesetError):
     """The tileset cannot be served at all.
 
-    Translated into a whole-``tileset_info`` error payload.
-
-    Current sites: ``bedfile.py:70,90`` (no chromsizes / file >20MB),
-    ``bedpe.py:88,101``, ``imtiles.py:8``.
+    An unreadable file, a missing index, a header that will not parse. Fatal to
+    the whole request, not to one tile.
     """
 
 
-class MalformedTileId(TileError):
+class MalformedTileId(TilesetError):
     """A tile id could not be parsed against the tileset's declared shape."""
 
 
-class UnsupportedModifier(TileError):
+class UnsupportedModifier(MalformedTileId):
     """The tile id carries a modifier this tileset does not declare."""
 
 
-class UnsupportedOption(TileError):
+class UnsupportedOption(MalformedTileId):
     """The tile id carries a ``,key:value`` option this tileset does not declare."""
 
 
-class TileOutOfBounds(TileError):
-    """The requested position does not exist at this zoom level.
+class TileError(TilesetError):
+    """Base for failures that affect one tile, leaving the batch servable."""
 
-    NOTE: today this is silently swallowed -- ``cooler.generate_tiles`` simply
-    ``continue``s, so the caller gets a short result list rather than an error.
-    Whether to preserve that or start raising is an open decision; see
-    conformance check #5 (batch integrity).
-    """
+    def to_dict(self) -> ErrorTilePayload:
+        """This error as a tile payload."""
+        return {"error": str(self), "error_type": type(self).__name__}
+
+
+class TileOutOfBounds(TileError):
+    """The requested position does not exist at this zoom level."""
 
 
 class TileTooWide(TileError):
-    """The tile spans more of the coordinate space than policy allows.
-
-    Current sites: ``tabix.py:262``, ``vcf.py:130``, ``fasta.py:181``,
-    ``bam.py:628``.
-    """
+    """The tile spans more of the coordinate space than policy allows."""
 
 
 class TileTooLarge(TileError):
     """Serving the tile would require reading more data than policy allows.
 
-    Distinct from :class:`TileTooWide` -- this is about the *estimated result
-    size*, not the coordinate span.
-
-    Current sites: ``tabix.py:284,299``, ``vcf.py:155``, ``bam.py:426``.
+    This is based on an estimated result size, not the coordinate span.
     """

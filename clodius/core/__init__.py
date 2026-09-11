@@ -1,7 +1,8 @@
-from clodius.core.coords import Chromsizes, GenomicRange, Canvas, TileGrid
+from clodius.core.coords import Chromsizes, GenomicRange, TileCanvas
 from clodius.core.errors import (
     MalformedTileId,
     TileError,
+    TilesetError,
     TileOutOfBounds,
     TilesetUnavailable,
     TileTooLarge,
@@ -9,8 +10,7 @@ from clodius.core.errors import (
     UnsupportedModifier,
     UnsupportedOption,
 )
-from clodius.core.payloads import TileKind
-from clodius.core.policies import DEFAULT_POLICY, TilePolicy, GridPolicy
+from clodius.core.policies import TilePolicy
 from clodius.core.tileid import ModifierSpec, TileId
 from clodius.core.tileset import (
     BaseTileset,
@@ -26,10 +26,7 @@ from clodius.core.tileset import (
 __all__ = [
     "BaseTileset",
     "Canvas",
-    "GridPolicy",
-    "TileGrid",
     "Chromsizes",
-    "DEFAULT_POLICY",
     "Dataset",
     "DatasetInfo",
     "GenomicRange",
@@ -38,8 +35,8 @@ __all__ = [
     "ProvidesRegions",
     "MalformedTileId",
     "ModifierSpec",
-    "TileKind",
     "TileError",
+    "TilesetError",
     "TileId",
     "TileOutOfBounds",
     "TilePolicy",

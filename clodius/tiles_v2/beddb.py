@@ -1,15 +1,4 @@
-"""beddb (.multires.db, 1D) rewritten against clodius.core.
-
-The 1D sibling of ``tiles_v2/bed2ddb.py`` and the reference **STRATIFIED**
-tileset: features are ranked and assigned a ``zoomLevel`` at aggregation time,
-and a tile returns those with ``zoomLevel <= z``. Zoom is a priority threshold,
-so density is bounded by construction -- no request-time cap, no subsampling,
-and the ``importance`` on the wire is the real ranking that produced the zoom
-levels rather than a stand-in for one.
-
-This is the model ``bedfile``, ``bigbed`` and ``gff`` approximate with
-``random.random()``. Worth reading alongside ``tiles_v2/bed.py`` to see what the
-approximation costs.
+"""beddb (.multires.db, 1D)
 
 Four schema versions
 --------------------
@@ -38,49 +27,31 @@ the one place the implicit-ladder assumption is load-bearing rather than
 descriptive.
 
 :class:`_Selector` isolates the four, so the rest of the module is version-blind.
-
-Fixed here
-----------
-
-- **The post-filter is gone.** Legacy re-tests each row in Python with
-  ``x_start < tile_x_end and x_end >= tile_x_start`` after the query already
-  selected on position. Harmless for one tile, but it silently disagrees with
-  the SQL at the edges (the query is closed on both ends, the filter half-open
-  on one), and it is what breaks ``bed2ddb``'s 1D path outright.
-- **``"3t"`` no longer double-filters.** That version's ``tiles`` table *is* the
-  tile assignment; applying a coordinate test afterwards can only drop records
-  the aggregation step deliberately placed there.
-- **One connection per tileset, not per tile**, and ``tileset_info`` read once.
-  Legacy calls ``tileset_info`` inside ``get_1D_tiles``, so a 16-tile batch
-  opens 32 connections and re-parses the info table 16 times.
-- **The dead ``extra_zoom`` loop is gone.** ``extra_zoom = 0`` immediately
-  before ``for j in range(2**extra_zoom)``, with ``new_rows = {}`` assigned and
-  overwritten by ``new_rows = []`` on the next line.
 """
 
 from __future__ import annotations
 
 import os
-from typing import ClassVar, Sequence
+from typing import Sequence
 
 import apsw
 import sosqlite
 
 from clodius.core.coords import Chromsizes
-from clodius.core.payloads import BedlikeTile, RegionRow, TileKind
-from clodius.core.policies import DEFAULT_POLICY, DensityPolicy, TilePolicy
+from clodius.core.tile import AnnotationRecord
+from clodius.core.policies import TilePolicy
 from clodius.core.tileid import TileId
 from clodius.core.tileset import BaseTileset, TilesetInfo
 
 _VFS = sosqlite.SmartOpenVFS(name="so-vfs-v2-beddb")
 
 
-def to_bedlike(row: tuple, name: str | None = None) -> BedlikeTile:
+def to_bedlike(row: tuple, name: str | None = None) -> AnnotationRecord:
     """One database row as the client's bedlike shape."""
     uid = row[5]
     if isinstance(uid, bytes):
         uid = uid.decode("utf8")
-    record: BedlikeTile = {
+    record: AnnotationRecord = {
         "uid": uid,
         "xStart": row[0],
         "xEnd": row[1],
@@ -168,25 +139,22 @@ class BedDbTileset(BaseTileset):
         the file's own stratification, and every query is indexed.
     """
 
-    datatype: ClassVar[str] = "bedlike"
-    ndim: ClassVar[int] = 1
-    tile_kind: ClassVar[TileKind] = TileKind.BEDLIKE
+    ndim = 1
+    datatype = "bedlike"
     modifiers = None
     options = frozenset()
-
-    density_policy: ClassVar[DensityPolicy] = DensityPolicy.STRATIFIED
 
     def __init__(
         self,
         path: str | os.PathLike,
-        policy: TilePolicy = DEFAULT_POLICY,
+        policy: TilePolicy | None = None,
+        tile_size: int | None = None,
     ):
         self._path = os.fspath(path)
-        self._policy = policy
         self._conn: apsw.Connection | None = None
         self._info, self._selector = self._read_header()
-
-    # --- resource lifetime --------------------------------------------------
+        self.policy = policy or TilePolicy()
+        self.tile_size = tile_size or self._info.tile_size
 
     @property
     def conn(self) -> apsw.Connection:
@@ -201,12 +169,6 @@ class BedDbTileset(BaseTileset):
             self._conn.close()
             self._conn = None
 
-    # --- the protocol -------------------------------------------------------
-
-    @property
-    def policy(self) -> TilePolicy:
-        return self._policy
-
     @property
     def version(self):
         return self._selector.version
@@ -217,12 +179,16 @@ class BedDbTileset(BaseTileset):
     def info(self) -> TilesetInfo:
         return self._info
 
-    def tiles(self, ids: Sequence[TileId]):
+    def tiles(
+        self, ids: Sequence[TileId], options=None
+    ) -> list[tuple[TileId, list[AnnotationRecord]]]:
         return [(tid, self._tile(tid)) for tid in ids]
 
     # --- ProvidesRegions ----------------------------------------------------
 
-    def regions(self, offset: int, limit: int) -> tuple[list[RegionRow], bool]:
+    def regions(
+        self, offset: int, limit: int
+    ) -> tuple[list[AnnotationRecord], bool]:
         """A page of records over the whole coordinate space.
 
         Legacy's ``list_items`` takes explicit start/end and applies
@@ -285,7 +251,7 @@ class BedDbTileset(BaseTileset):
         )
         return info, _Selector(version)
 
-    def _tile(self, tid: TileId) -> list[BedlikeTile]:
+    def _tile(self, tid: TileId) -> list[AnnotationRecord]:
         selector = self._selector
 
         if selector.precomputed_tiles:
@@ -300,7 +266,8 @@ class BedDbTileset(BaseTileset):
 
         rows = self.conn.cursor().execute(query)
         records = [
-            to_bedlike(r, name=r[6] if selector.has_name else None) for r in rows
+            to_bedlike(r, name=r[6] if selector.has_name else None)
+            for r in rows
         ]
         records.sort(key=lambda r: r["xStart"])
         return records
@@ -320,7 +287,7 @@ class BedDbTileset(BaseTileset):
 #    as an oversight rather than a decision, since the column would not be in
 #    the projection otherwise.
 #
-# 3. No `max_entries_per_tile`. STRATIFIED bounds density at aggregation time,
+# 3. No `max_records`. STRATIFIED bounds density at aggregation time,
 #    so a cap here would drop records the file ranked deliberately. `TilePolicy`
 #    is accepted only so every tileset takes one.
 #
@@ -346,3 +313,21 @@ class BedDbTileset(BaseTileset):
 #
 #    So the sentinel stays until one turns up. Dropping it for v1 alone would
 #    make the two branches diverge for a reason nobody could check.
+#
+#
+# Fixed here
+# ----------
+# - **The post-filter is gone.** Legacy re-tests each row in Python with
+#   ``x_start < tile_x_end and x_end >= tile_x_start`` after the query already
+#   selected on position. Harmless for one tile, but it silently disagrees with
+#   the SQL at the edges (the query is closed on both ends, the filter half-open
+#   on one), and it is what breaks ``bed2ddb``'s 1D path outright.
+# - **``"3t"`` no longer double-filters.** That version's ``tiles`` table *is* the
+#   tile assignment; applying a coordinate test afterwards can only drop records
+#   the aggregation step deliberately placed there.
+# - **One connection per tileset, not per tile**, and ``tileset_info`` read once.
+#   Legacy calls ``tileset_info`` inside ``get_1D_tiles``, so a 16-tile batch
+#   opens 32 connections and re-parses the info table 16 times.
+# - **The dead ``extra_zoom`` loop is gone.** ``extra_zoom = 0`` immediately
+#   before ``for j in range(2**extra_zoom)``, with ``new_rows = {}`` assigned and
+#   overwritten by ``new_rows = []`` on the next line.

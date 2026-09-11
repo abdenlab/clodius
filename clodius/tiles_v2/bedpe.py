@@ -1,74 +1,6 @@
-"""BEDPE rewritten against clodius.core, reading through oxbow + polars.
-
-Two tilesets over one file format, because a paired-interval record is drawn two
-incompatible ways and the selection rule follows the drawing, not the file:
-
-- :class:`BedpeTileset` -- ``ndim=2``, rectangles over a contact map.
-- :class:`BedpeLinksTileset` -- ``ndim=1``, links/arcs on a 1D track.
-
-Legacy serves both from one module, dispatching on tile-id arity inside
-``tiles()``. Splitting them makes the selection rule a property of the type
-rather than a runtime branch, and lets the 1D one carry a :class:`LinkPolicy`
-that has no meaning in 2D. The cost is that a BEDPE shown both ways is
-registered twice, where legacy needed one uid.
-
-Why 2D has no policy and 1D does
---------------------------------
-
-One rule underlies both: *select records whose drawn extent intersects the
-query region*. The extents differ.
-
-A rectangle's extent **is** ``anchor1 x anchor2``, and two rectangles intersect
-iff they overlap on both axes. So anchor-wise overlap is already exactly right
-in 2D -- including for a rectangle spanning the whole tile, whose anchors then
-overlap the ranges without being contained in them. There is nothing to choose.
-
-An arc's extent is the **hull** ``[min(start), max(end))`` -- the span *between*
-the anchors, which neither anchor covers. Anchor-wise overlap therefore misses
-links that pass over the tile. That gap is what :class:`LinkPolicy` exposes, and
-it exists only in 1D because only in 1D does the geometry connect the anchors.
-
-What the index can and cannot do
---------------------------------
-
-Tabix on a BEDPE indexes the first three columns, i.e. anchor 1 only. So a seek
-is sound exactly when the predicate constrains anchor 1:
-
-===================  =========  ========================================
-tileset              seek?      why
-===================  =========  ========================================
-BedpeTileset (2D)    yes        anchor 1 must be in the x range
-Links, ``BOTH``      yes        anchor 1 must be in the range
-Links, ``EITHER``    no         anchor 2 alone may satisfy it
-Links, ``HULL``      no         a spanning link's anchor 1 is unbounded
-===================  =========  ========================================
-
-:meth:`_BedpeBase._select` returns the predicate and the seek ranges together so
-those two cannot drift apart -- asking for a seek the predicate does not justify
-is the mistake that silently drops records.
-
-What changes relative to ``clodius/tiles/bedpe.py``
---------------------------------------------------
-
-Everything ``bed.py`` fixed, for the same reasons: no whole-file pandas
-materialization, ``importance`` from the record digest rather than
-``random.random()``, thinning by ``top_k`` rather than ``df.sample``, errors
-raised rather than returned as ``{"error": ...}``, limits from
-:class:`TilePolicy`, and ``chromsizes`` required at construction. Plus:
-
-- **``uid`` is a content digest, not the row number.** Legacy uses ``row["ix"]``,
-  the pandas index, so uids change if the file is re-sorted.
-- **``chrOffset`` is emitted.** Legacy sends only ``xChrOffset``/``yChrOffset``,
-  so an arcs track configured with ``startField``/``endField`` computes
-  ``undefined + n`` and gets NaN. See :class:`PairedTile`.
-- **The double cache write is gone.** ``bedpe_to_df`` writes a raw DataFrame and
-  then a dict under the same key.
-"""
-
 from __future__ import annotations
 
 import os
-from enum import Enum
 from typing import ClassVar, Sequence
 
 import oxbow as ox
@@ -76,14 +8,11 @@ import polars as pl
 
 from clodius.core.coords import Chromsizes, GenomicRange
 from clodius.core.errors import TilesetUnavailable
-from clodius.core.payloads import PairedTile, TileKind
-from clodius.core.policies import DEFAULT_POLICY, DensityPolicy, TilePolicy
+from clodius.core.tile import Annotation2DRecord
+from clodius.core.policies import TilePolicy, LinkPolicy
 from clodius.core.tileid import TileId
-from clodius.core.tileset import BaseTileset, TilesetInfo, quadtree_depth
+from clodius.core.tileset import BaseTileset, TilesetInfo
 
-# Same quadtree as bed2ddb, which is the precomputed form of this data:
-# tile_size 1024, max_width padded to 1024 * 2**max_zoom. Verified against
-# test/sample_data/arrowhead_domains_short.txt.multires.db.
 TILE_SIZE = 1024
 
 HASH_SEED = 0x1F4B_5C0D
@@ -155,7 +84,7 @@ def _anchor_overlaps(
     return expr
 
 
-def to_paired(row: dict, offsets: dict[str, int]) -> PairedTile:
+def to_paired(row: dict, offsets: dict[str, int]) -> Annotation2DRecord:
     """One materialized row as the client's bedpe shape."""
     x_offset = offsets[row["chrom"]]
     y_offset = offsets[row["chrom2"]]
@@ -200,19 +129,16 @@ class _BedpeBase(BaseTileset):
     splitting them: the selection rule is the type, not a runtime branch.
     """
 
-    datatype: ClassVar[str] = "bedlike"
-    tile_kind: ClassVar[TileKind] = TileKind.PAIRED
     modifiers = None
     options = frozenset()
-
-    density_policy: ClassVar[DensityPolicy] = DensityPolicy.SUBSAMPLED
 
     def __init__(
         self,
         path: str | os.PathLike,
         chromsizes: Chromsizes,
         index_path: str | os.PathLike | None = None,
-        policy: TilePolicy = DEFAULT_POLICY,
+        policy: TilePolicy | None = None,
+        tile_size: int = TILE_SIZE,
     ):
         self._path = os.fspath(path)
         self._index_path = os.fspath(index_path) if index_path else None
@@ -220,19 +146,14 @@ class _BedpeBase(BaseTileset):
             self._path
         )
         self._chromsizes = chromsizes
-        self._policy = policy
+        self.policy = policy or TilePolicy()
+        self.tile_size = tile_size
         self._info = self._build_info()
         self._checked_size = False
-
-    # --- the protocol -------------------------------------------------------
 
     @property
     def is_indexed(self) -> bool:
         return self._is_indexed
-
-    @property
-    def policy(self) -> TilePolicy:
-        return self._policy
 
     def chromsizes(self) -> Chromsizes:
         return self._chromsizes
@@ -240,7 +161,9 @@ class _BedpeBase(BaseTileset):
     def info(self) -> TilesetInfo:
         return self._info
 
-    def tiles(self, ids: Sequence[TileId]):
+    def tiles(
+        self, ids: Sequence[TileId], options=None
+    ) -> list[tuple[TileId, list[Annotation2DRecord]]]:
         return [(tid, self._tile(tid)) for tid in ids]
 
     def close(self) -> None:
@@ -262,21 +185,11 @@ class _BedpeBase(BaseTileset):
     # --- internals ----------------------------------------------------------
 
     def _build_info(self) -> TilesetInfo:
-        total = self._chromsizes.total_length
-        max_zoom = quadtree_depth(total, TILE_SIZE)
-
         # Square and two-dimensional in `min_pos`/`max_pos` for both subclasses.
         # bed2ddb declares `[1, 1]` / `[max_length, max_length]` regardless of
         # which track reads it, and a 1D track takes the x entries and ignores
         # the rest, so this stays uniform rather than varying with `ndim`.
-        return TilesetInfo(
-            min_pos=[0, 0],
-            max_pos=[total, total],
-            max_width=TILE_SIZE * 2**max_zoom,
-            tile_size=TILE_SIZE,
-            max_zoom=max_zoom,
-            chromsizes=self._chromsizes.to_pairs(),
-        )
+        return TilesetInfo.quadtree(self._chromsizes, self.tile_size, ndim=2)
 
     def _digest_expr(self) -> pl.Expr:
         """A stable 64-bit digest of the whole record.
@@ -294,7 +207,7 @@ class _BedpeBase(BaseTileset):
     def _check_scannable(self) -> None:
         if self._checked_size:
             return
-        limit = self._policy.max_unindexed_filesize
+        limit = self.policy.max_scan_bytes
         size = os.path.getsize(self._path)
         if limit is not None and size > limit:
             raise TilesetUnavailable(
@@ -331,7 +244,7 @@ class _BedpeBase(BaseTileset):
         ).pl(lazy=True)
         return _with_anchor2(frame)
 
-    def _tile(self, tid: TileId) -> list[PairedTile]:
+    def _tile(self, tid: TileId) -> list[Annotation2DRecord]:
         canvas = self._info.canvas(tid.z)
         predicate, seek_to = self._select(canvas, tid)
 
@@ -341,7 +254,7 @@ class _BedpeBase(BaseTileset):
             .with_columns(_digest=self._digest_expr())
         )
 
-        cap = self._policy.max_entries_per_tile
+        cap = self.policy.max_records
         if cap is not None:
             frame = frame.top_k(cap, by="_digest")
 
@@ -372,6 +285,7 @@ class BedpeTileset(_BedpeBase):
     """
 
     ndim: ClassVar[int] = 2
+    datatype: ClassVar[str] = "2d-rectangle-domains"
 
     def _select(self, canvas, tid):
         x_ranges = list(canvas.invert(tid.pos[0]))
@@ -382,22 +296,6 @@ class BedpeTileset(_BedpeBase):
         # Anchor 1 is constrained to the x range, so seeking it is sound; the
         # anchor-2 term trims what comes back.
         return predicate, x_ranges
-
-
-class LinkPolicy(str, Enum):
-    """Which links a 1D tile returns."""
-
-    # Both anchors overlap the range: interactions entirely in view. The same
-    # predicate BedpeTileset applies, with x and y ranges coinciding.
-    BOTH = "both"
-
-    # At least one anchor overlaps: interactions touching the region. Legacy
-    # `bedpe.single_1d_tile` behaviour.
-    EITHER = "either"
-
-    # The hull [min(start), max(end)) overlaps: every link with any visible
-    # part, including one that spans the range with both anchors outside it.
-    HULL = "hull"
 
 
 class BedpeLinksTileset(_BedpeBase):
@@ -417,8 +315,11 @@ class BedpeLinksTileset(_BedpeBase):
     """
 
     ndim: ClassVar[int] = 1
+    datatype: ClassVar[str] = "bedlike"
 
-    def __init__(self, *args, link_policy: LinkPolicy = LinkPolicy.EITHER, **kwargs):
+    def __init__(
+        self, *args, link_policy: LinkPolicy = LinkPolicy.EITHER, **kwargs
+    ):
         super().__init__(*args, **kwargs)
         self._link_policy = LinkPolicy(link_policy)
 
@@ -459,6 +360,7 @@ class BedpeLinksTileset(_BedpeBase):
                     hull = hull | term
                 return (intra & hull) | (~intra & (a1 | a2)), None
 
+
 # --- Notes ------------------------------------------------------------------
 #
 # 1. The predicate is applied even on the seek path, unlike bed.py where it was
@@ -496,14 +398,26 @@ class BedpeLinksTileset(_BedpeBase):
 #    `from_bigbed(path, schema="autosql")`. That belongs as a sibling of the
 #    bigbed tileset, not here.
 #
-# 5. `max_entries_per_tile` defaults to 1024 from TilePolicy, where legacy
+# 5. `max_records` defaults to 1024 from TilePolicy, where legacy
 #    hardcodes 512 for bedpe and 1024 for bedfile. Never justified separately;
 #    a 2D tile arguably wants fewer records than a 1D one, so if the difference
 #    is deliberate it belongs in the policy as a second field rather than as a
 #    constant here. Now that the two are separate classes, they could also carry
 #    different defaults -- which is an argument for the split, not against it.
 #
-# 6. `TileId.parse` still supports `ndim` as a collection of arities. Nothing
-#    uses it after this split; it was added when one class served both. Left in
-#    place rather than reverted, but it is dead weight in core until a type
-#    needs it.
+#
+# What changes relative to ``clodius/tiles/bedpe.py``
+# --------------------------------------------------
+# Everything ``bed.py`` fixed, for the same reasons: no whole-file pandas
+# materialization, ``importance`` from the record digest rather than
+# ``random.random()``, thinning by ``top_k`` rather than ``df.sample``, errors
+# raised rather than returned as ``{"error": ...}``, limits from
+# :class:`TilePolicy`, and ``chromsizes`` required at construction. Plus:
+
+# - **``uid`` is a content digest, not the row number.** Legacy uses ``row["ix"]``,
+#   the pandas index, so uids change if the file is re-sorted.
+# - **``chrOffset`` is emitted.** Legacy sends only ``xChrOffset``/``yChrOffset``,
+#   so an arcs track configured with ``startField``/``endField`` computes
+#   ``undefined + n`` and gets NaN. See :class:`Annotation2DRecord`.
+# - **The double cache write is gone.** ``bedpe_to_df`` writes a raw DataFrame and
+#   then a dict under the same key.
