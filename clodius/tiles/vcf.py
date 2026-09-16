@@ -4,7 +4,7 @@ import random
 
 import clodius.tiles.tabix as rtt
 from clodius.tiles.bigwig import abs2genomic
-from clodius.utils import TILE_OPTIONS_CHAR
+from clodius.tiles.utils import TILE_OPTIONS_CHAR
 
 
 def grouper(n, iterable):
@@ -17,14 +17,28 @@ def grouper(n, iterable):
 
 
 def generic_regions(fetcher, offset, limit):
+    """Page through a region iterator.
+
+    Returns
+    -------
+    (rows, has_next): (list, bool)
+        The requested page and whether another page follows. Callers unpack
+        this pair; the caller-side envelope ({offset, limit, results, next})
+        is assembled by the server, not here.
+    """
     if offset:
         for i in range(offset):
             try:
                 next(fetcher)
             except StopIteration:
-                return {"offset": offset, "limit": limit, "results": [], "next": False}
+                # offset ran past the end of the data
+                return ([], False)
 
-    curr_page = next(grouper(limit, fetcher))
+    try:
+        curr_page = next(grouper(limit, fetcher))
+    except StopIteration:
+        # offset landed exactly at the end of the data
+        return ([], False)
 
     try:
         # see if there's another page of results
@@ -33,7 +47,7 @@ def generic_regions(fetcher, offset, limit):
     except StopIteration:
         next_page = False
 
-    ret = curr_page
+    ret = list(curr_page)
 
     return (ret, next_page)
 

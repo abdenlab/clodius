@@ -8,7 +8,7 @@ import pandas as pd
 import clodius.tiles.bigwig as ctbw
 from clodius.tiles.tabix import est_query_size_ix, load_bai_index
 from clodius.tiles.utils import abs2genomic
-from clodius.utils import TILE_OPTIONS_CHAR
+from clodius.tiles.utils import TILE_OPTIONS_CHAR
 import logging
 
 import oxbow as ox

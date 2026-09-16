@@ -2,6 +2,8 @@ import collections as col
 import clodius.tiles.bedarcsdb as hgbad
 import os.path as op
 
+testdir = op.realpath(op.dirname(op.dirname(__file__)))
+
 
 def get_counts(filename, zoom, pos):
     data = hgbad.tiles(filename, ["b.{}.{}".format(zoom, pos)])
@@ -17,8 +19,7 @@ def get_counts(filename, zoom, pos):
 
 
 def test_bedarcsdb_tiles1():
-    filename = op.join(
-        "data",
+    filename = op.join(testdir, "data",
         "9ae0744a-9bc1-4cd7-b7cf-c6569ed9e4aa"
         ".pcawg_consensus_1.6.161022.somatic.sv.bedpe.multires.db",
     )
@@ -85,7 +86,7 @@ def test_bedarcsdb_tiles():
     """
     Retrieve a 1D tile from a 2d file
     """
-    filename = op.join("data", "arrowhead_domains_short.txt.multires.db")
+    filename = op.join(testdir, "data", "arrowhead_domains_short.txt.multires.db")
 
     pos = 2
     hgbad.tiles(filename, ["b.2.{}".format(pos)])

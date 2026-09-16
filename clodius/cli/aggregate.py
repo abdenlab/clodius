@@ -4,9 +4,10 @@ from __future__ import division, print_function
 from . import cli
 
 import click
-import clodius.chromosomes as cch
-import clodius.multivec as cmv
-import clodius.array as ct
+import clodius.tiles.chromosomes as cch
+import clodius.cli.multivec as cmv
+# The reader's downsampler, so the writer bins the same way it will be read.
+from clodius.tiles.hdf_tiles import aggregate as aggregate_bins
 import collections as col
 import h5py
 import math
@@ -940,9 +941,9 @@ def _bedgraph(
 
             # aggregate and store aggregated values in the next zoom_level's
             # data
-            data_buffers[curr_zoom + 1] += list(ct.aggregate(curr_chunk, 2**zoom_step))
+            data_buffers[curr_zoom + 1] += list(aggregate_bins(curr_chunk, 2**zoom_step))
             nan_data_buffers[curr_zoom + 1] += list(
-                ct.aggregate(nan_curr_chunk, 2**zoom_step)
+                aggregate_bins(nan_curr_chunk, 2**zoom_step)
             )
 
             data_buffers[curr_zoom] = data_buffers[curr_zoom][chunk_size:]
@@ -1053,9 +1054,9 @@ def _bedgraph(
         nan_dsets[curr_zoom][curr_pos : curr_pos + chunk_size] = nan_curr_chunk
 
         # aggregate and store aggregated values in the next zoom_level's data
-        data_buffers[curr_zoom + 1] += list(ct.aggregate(curr_chunk, 2**zoom_step))
+        data_buffers[curr_zoom + 1] += list(aggregate_bins(curr_chunk, 2**zoom_step))
         nan_data_buffers[curr_zoom + 1] += list(
-            ct.aggregate(nan_curr_chunk, 2**zoom_step)
+            aggregate_bins(nan_curr_chunk, 2**zoom_step)
         )
 
         data_buffers[curr_zoom] = data_buffers[curr_zoom][chunk_size:]

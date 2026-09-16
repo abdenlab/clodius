@@ -2,7 +2,7 @@ import logging
 import numpy.random as nr
 import random
 import clodius.tiles.bigwig as hgbw
-from clodius.utils import TILE_OPTIONS_CHAR
+from clodius.tiles.utils import TILE_OPTIONS_CHAR
 import pybigtools
 from hashlib import md5
 

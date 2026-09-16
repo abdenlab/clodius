@@ -1,0 +1,30 @@
+# Test fixtures that are too large to keep in git.
+#
+# Small synthetic fixtures live in `test/data/` and are committed; this
+# file indexes the rest, which are fetched on demand and cached. A test that
+# needs one is skipped when it cannot be fetched, so the suite stays green
+# offline.
+#
+# To add a file: upload it, then
+#
+#     python test/fixtures.py stanza <path> <key>
+#
+# which prints the entry below with its size and digest filled in.
+
+# Overridable with CLODIUS_FIXTURE_BASE_URL, e.g. to point at a local mirror.
+base_url = "https://pub-c19f49d19c504429973da5246c32aab7.r2.dev"
+
+[files."GRCh38-cCREs.bed9.gz"]
+sha256 = "988219edd636eb5a90064b31889c502dced9e6cbd96f0ebb1b66aa6fe730087c"
+size = 37930545
+description = ""
+companions = ["GRCh38-cCREs.bed9.gz.tbi"]
+
+[files."GRCh38-cCREs.bed9.gz.tbi"]
+sha256 = "70a5aff67df2b4ed41f1f64c0d95472a6c459127a45dc21861966d067c82d421"
+size = 765362
+
+[files."test.mcool"]
+sha256 = "a77252c0dffc38cdd31c0d8c05751f92f37c094dc462781e960df3fbd8594d14"
+size = 152457504
+description = ""

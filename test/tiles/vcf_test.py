@@ -1,9 +1,11 @@
 import os.path as op
 
-import clodius.chromosomes as cc
+import clodius.tiles.chromosomes as cc
 import clodius.tiles.bedfile as ctb
 
 import pytest
+
+testdir = op.realpath(op.dirname(op.dirname(__file__)))
 
 
 @pytest.mark.parametrize(
@@ -14,8 +16,8 @@ import pytest
     ],
 )
 def test_vcf_tiles(file):
-    valid_filename = op.join("data", file)
-    chromsizes_fn = op.join("data", "chm13v1.chrom.sizes")
+    valid_filename = op.join(testdir, "data", file)
+    chromsizes_fn = op.join(testdir, "data", "chm13v1.chrom.sizes")
 
     chromsizes = cc.chromsizes_as_series(chromsizes_fn)
 

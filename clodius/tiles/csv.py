@@ -1,4 +1,4 @@
-from clodius.chromosomes import chromsizes_as_array
+from clodius.tiles.chromosomes import chromsizes_as_array
 import io
 
 

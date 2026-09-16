@@ -31,13 +31,18 @@ pytest test/cli_test.py::test_clodius_aggregate_bedgraph
 
 Lint:
 ```shell
-flake8 clodius
+ruff check clodius
+```
+
+Format (not enforced in CI — the tree predates `ruff format`):
+```shell
+ruff format clodius
 ```
 
 ## Key Conventions
 
-- **Linting**: flake8 (configured via `pyproject.toml`)
+- **Linting**: ruff (configured via `pyproject.toml`)
 - **Tests**: pytest with coverage (`pytest --cov=clodius`)
 - **Build**: hatchling
-- **Main branch**: `develop` (use this as the base for PRs)
+- **Main branch**: `main` (use this as the base for PRs)
 - **Python packaging**: `pyproject.toml` (no `setup.py`)

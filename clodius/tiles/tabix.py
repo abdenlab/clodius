@@ -8,7 +8,7 @@ from typing import Literal
 from smart_open import open
 
 from clodius.tiles.bigwig import abs2genomic
-from clodius.utils import get_file_compression
+from clodius.tiles.utils import get_file_compression
 
 
 def load_bai_index(index_file):

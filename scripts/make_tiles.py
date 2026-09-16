@@ -5,7 +5,7 @@ from __future__ import print_function
 from time import gmtime, strftime
 import argparse
 
-import clodius.fpark as cfp
+import scripts.fpark as cfp
 import clodius.tiles as cti
 import clodius.describe_dataset as cdd
 import clodius.save_tiles as cst

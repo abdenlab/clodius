@@ -3,7 +3,9 @@ import os.path as op
 import pytest
 
 from clodius.tiles.pileup import get_local_tiles, get_pileup_alignment_data, cigar_to_subs
-from clodius.alignment import align_sequences, alignment_to_subs
+from clodius.tiles.alignment import align_sequences, alignment_to_subs
+
+testdir = op.realpath(op.dirname(op.dirname(__file__)))
 
 
 # ---------------------------------------------------------------------------
@@ -50,9 +52,9 @@ def test_alignment_to_subs():
 # get_local_tiles  (requires mappy)
 # ---------------------------------------------------------------------------
 
-CSV_PATH = op.join("data", "pileup_test.csv")
-REF_PATH = op.join("data", "pileup_ref.fa")
-CHROMSIZES_PATH = op.join("data", "pileup_chromsizes.tsv")
+CSV_PATH = op.join(testdir, "data", "pileup_test.csv")
+REF_PATH = op.join(testdir, "data", "pileup_ref.fa")
+CHROMSIZES_PATH = op.join(testdir, "data", "pileup_chromsizes.tsv")
 
 
 def _assert_result_structure(result):

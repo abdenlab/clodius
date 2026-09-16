@@ -13,8 +13,8 @@ import json
 import hashlib
 
 import click
-import clodius.chromosomes as cch
-import clodius.multivec as cmv
+import clodius.tiles.chromosomes as cch
+import clodius.cli.multivec as cmv
 import negspy.coordinates as nc
 import scipy.misc as sm
 from clodius.tiles.bam import get_cigar_substitutions

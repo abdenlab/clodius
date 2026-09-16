@@ -1,0 +1,197 @@
+"""Tile identifier parsing.
+
+Grammar::
+
+    tile_id  := uid "." z ( "." coord )* ( "." modifier )? ( "," option )*
+    option   := key ":" value
+
+``uid`` must round-trip verbatim into the response key: the client matches
+responses to requests by exact string.
+
+``z`` is an index into the tileset's resolution ladder, coarsest first.
+
+Modifiers are determined by a ``ModifierSpec``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from clodius.core.errors import (
+    MalformedTileId,
+    UnsupportedModifier,
+    UnsupportedOption,
+)
+
+# Separator between the dotted tile position and any ``key:value`` options.
+TILE_OPTIONS_CHAR = ","
+
+
+def _is_int(text: str) -> bool:
+    """Whether a dotted part is a coordinate rather than a modifier."""
+    return text.isdigit() or (text[:1] == "-" and text[1:].isdigit())
+
+
+@dataclass(frozen=True, slots=True)
+class ModifierSpec:
+    """What a tileset accepts in the modifier slot after the coordinates.
+
+    A spec lets a tileset declare what modifers it accepts when a tile is
+    requested. The slot is type-specific and overloaded across the codebase:
+
+    ==========  =========================================  ===========
+    tileset     values                                     meaning
+    ==========  =========================================  ===========
+    bigwig      mean/min/max/std/sum                       aggregation
+    bigwig      minMax/whisker                             range mode (changes dimensionality!)
+    bigbed      significant                                range mode
+    cooler      default/None/<column name>                 transform
+    ==========  =========================================  ===========
+    """
+
+    values: frozenset[str]
+    default: str | None = None
+    # Free-form label for what the slot signifies ('aggregation', 'transform', ...).
+    kind: str = "modifier"
+    # When set, `values` lists the recognized sentinels but any other non-empty
+    # string is accepted too and the tileset validates meaning at fetch time.
+    allow_unknown: bool = False
+
+    def validate(self, value: str | None) -> str | None:
+        if value is None:
+            return self.default
+        if value in self.values:
+            return value
+        if self.allow_unknown:
+            if not value:
+                raise UnsupportedModifier(f"empty {self.kind}")
+            return value
+        raise UnsupportedModifier(
+            f"{value!r} is not a valid {self.kind}; expected one of "
+            f"{sorted(self.values)}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TileId:
+    """A parsed tile identifier.
+
+    Immutable and hashable so it can be used as a key.
+    """
+
+    uid: str
+    z: int
+    pos: tuple[int, ...]
+    modifier: str | None = None
+    # ``key:value`` options as a tuple of pairs, so the whole record stays
+    # hashable. Use :meth:`option` to read one.
+    options: tuple[tuple[str, str], ...] = ()
+    # The original string, verbatim. MUST be used as the response key.
+    raw: str = ""
+
+    @property
+    def z_and_pos(self) -> tuple[int, ...]:
+        return (self.z, *self.pos)
+
+    def option(self, key: str, default: str | None = None) -> str | None:
+        for k, v in self.options:
+            if k == key:
+                return v
+        return default
+
+    @classmethod
+    def parse(
+        cls,
+        tile_id: str,
+        *,
+        ndim: int,
+        modifiers: ModifierSpec | None = None,
+        options: frozenset[str] | None = None,
+    ) -> TileId:
+        """Parse ``tile_id`` against a tileset's declared shape.
+
+        Parameters
+        ----------
+        ndim
+            Number of coordinate slots after ``z``: 1 for vectors and 1D
+            annotations, 2 for matrices and 2D annotations.
+        modifiers
+            What the trailing modifier slot may contain, if anything.
+        options
+            Recognized ``,key:value`` keys. ``None`` accepts any; an empty set
+            rejects all.
+
+        Notes
+        -----
+        ``ndim`` and ``modifiers`` are required to disambiguate coordinate
+        slots from modifiers: with the arity fixed, a trailing non-numeric part
+        is unambiguously the modifier.
+        """
+        head, _, opt_str = tile_id.partition(TILE_OPTIONS_CHAR)
+
+        parsed_options: list[tuple[str, str]] = []
+        if opt_str:
+            for chunk in opt_str.split(TILE_OPTIONS_CHAR):
+                key, sep, value = chunk.partition(":")
+                if not sep:
+                    raise MalformedTileId(
+                        f"option {chunk!r} in {tile_id!r} is not 'key:value'"
+                    )
+                if options is not None and key not in options:
+                    raise UnsupportedOption(
+                        f"{key!r} is not a recognized option; expected one of "
+                        f"{sorted(options)}"
+                    )
+                parsed_options.append((key, value))
+
+        parts = head.split(".")
+        if ndim < 1:
+            raise ValueError(f"ndim must be at least 1, got {ndim}")
+
+        expected = 1 + 1 + ndim  # uid + z + coords
+        if len(parts) < expected or not all(
+            _is_int(p) for p in parts[1:expected]
+        ):
+            raise MalformedTileId(
+                f"{tile_id!r} does not match uid.z{'.pos' * ndim}; got "
+                f"{len(parts)} dotted parts ({parts!r})"
+            )
+
+        uid = parts[0]
+        numbers = [int(p) for p in parts[1:expected]]
+
+        modifier_parts = parts[expected:]
+        if len(modifier_parts) > 1:
+            raise MalformedTileId(
+                f"{tile_id!r} has {len(modifier_parts)} trailing parts after the "
+                f"{ndim}D position; expected at most one modifier"
+            )
+        raw_modifier = modifier_parts[0] if modifier_parts else None
+
+        if raw_modifier is not None and modifiers is None:
+            raise UnsupportedModifier(
+                f"{tile_id!r} carries modifier {raw_modifier!r} but this tileset "
+                f"declares none"
+            )
+        modifier = modifiers.validate(raw_modifier) if modifiers else None
+
+        return cls(
+            uid=uid,
+            z=numbers[0],
+            pos=tuple(numbers[1:]),
+            modifier=modifier,
+            options=tuple(parsed_options),
+            raw=tile_id,
+        )
+
+    def __str__(self) -> str:
+        return self.raw or self.format()
+
+    def format(self) -> str:
+        """Re-serialize. Prefer :attr:`raw` when echoing a request back."""
+        parts = [self.uid, str(self.z), *map(str, self.pos)]
+        if self.modifier is not None:
+            parts.append(self.modifier)
+        out = ".".join(parts)
+        for key, value in self.options:
+            out += f"{TILE_OPTIONS_CHAR}{key}:{value}"
+        return out

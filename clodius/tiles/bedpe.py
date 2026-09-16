@@ -6,8 +6,8 @@ import random
 import pandas as pd
 from pandas.errors import EmptyDataError
 
-from clodius.utils import TILE_OPTIONS_CHAR
-from clodius.utils import get_file_compression
+from clodius.tiles.utils import TILE_OPTIONS_CHAR
+from clodius.tiles.utils import get_file_compression
 
 cache = []
 

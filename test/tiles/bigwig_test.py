@@ -3,10 +3,11 @@ import os.path as op
 import numpy as np
 import base64
 
+testdir = op.realpath(op.dirname(op.dirname(__file__)))
+
 
 def test_bigwig_tiles():
-    filename = op.join(
-        "data", "wgEncodeCaltechRnaSeqHuvecR1x75dTh1014IlnaPlusSignalRep2.bigWig"
+    filename = op.join(testdir, "data", "wgEncodeCaltechRnaSeqHuvecR1x75dTh1014IlnaPlusSignalRep2.bigWig"
     )
 
     mean_tile = hgbi.tiles(filename, ["x.0.0"])
@@ -99,8 +100,7 @@ def test_bigwig_tiles():
 
 
 def test_tileset_info():
-    filename = op.join(
-        "data", "wgEncodeCaltechRnaSeqHuvecR1x75dTh1014IlnaPlusSignalRep2.bigWig"
+    filename = op.join(testdir, "data", "wgEncodeCaltechRnaSeqHuvecR1x75dTh1014IlnaPlusSignalRep2.bigWig"
     )
 
     tileset_info = hgbi.tileset_info(filename)

@@ -1,6 +1,6 @@
 #!/usr/bin/python
 
-import clodius.fpark as cfp
+import scripts.fpark as cfp
 import clodius.save_tiles as cst
 import argparse
 
