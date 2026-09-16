@@ -2,7 +2,7 @@ import re
 
 from Bio import Align
 import tempfile
-from clodius.alignment import alignment_to_subs, order_by_clustering
+from clodius.tiles.alignment import alignment_to_subs, order_by_clustering
 
 
 def get_subs(alignment):

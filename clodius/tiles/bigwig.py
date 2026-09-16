@@ -6,7 +6,7 @@ import pandas as pd
 import pybigtools
 
 import clodius.tiles.format as hgfo
-from clodius.utils import TILE_OPTIONS_CHAR
+from clodius.tiles.utils import TILE_OPTIONS_CHAR
 
 MAX_THREADS = 4
 TILE_SIZE = 1024

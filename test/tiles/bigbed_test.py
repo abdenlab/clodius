@@ -5,11 +5,12 @@ import pytest
 import clodius.tiles.bigbed as hgbb
 import clodius.tiles.bigwig as hgbw
 
+testdir = op.realpath(op.dirname(op.dirname(__file__)))
+
 
 @pytest.mark.skip(reason="Changed the bigbed tile fetching function rendering this test obsolete")
 def test_bigbed_tiles():
-    filename = op.join(
-        "data", "masterlist_DHSs_733samples_WM20180608_all_mean_signal_colorsMax.bed.bb"
+    filename = op.join(testdir, "data", "masterlist_DHSs_733samples_WM20180608_all_mean_signal_colorsMax.bed.bb"
     )
 
     tileset_info = hgbb.tileset_info(filename)
@@ -59,8 +60,7 @@ def test_bigbed_tiles():
 
 
 def test_tileset_info():
-    filename = op.join(
-        "data", "masterlist_DHSs_733samples_WM20180608_all_mean_signal_colorsMax.bed.bb"
+    filename = op.join(testdir, "data", "masterlist_DHSs_733samples_WM20180608_all_mean_signal_colorsMax.bed.bb"
     )
 
     tileset_info = hgbb.tileset_info(filename)

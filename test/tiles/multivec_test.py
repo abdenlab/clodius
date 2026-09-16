@@ -5,9 +5,11 @@ import h5py
 import pytest
 import clodius.tiles.multivec as hgmu
 
+testdir = op.realpath(op.dirname(op.dirname(__file__)))
+
 
 def test_multivec():
-    filename = op.join("test/sample_data", "sample_gwas.multires.mv5")
+    filename = op.join(testdir, "data", "sample_gwas.multires.mv5")
     with h5py.File(filename, "r") as h5:
         tile_size = h5["info"].attrs["tile-size"]
         resolutions = list(h5["resolutions"].keys())

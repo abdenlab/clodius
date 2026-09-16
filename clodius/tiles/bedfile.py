@@ -16,7 +16,7 @@ from smart_open import open
 
 # import pysam
 from clodius.tiles.vcf import generic_regions
-from clodius.utils import get_file_compression, TILE_OPTIONS_CHAR
+from clodius.tiles.utils import get_file_compression, TILE_OPTIONS_CHAR
 
 logger = logging.getLogger(__name__)
 

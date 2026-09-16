@@ -1,5 +1,4 @@
 import functools as ft
-import os.path as op
 import re
 from typing import List, Optional
 
@@ -7,8 +6,7 @@ import math
 import numpy as np
 from pydantic import BaseModel, validator
 
-from clodius.chromosomes import load_chromsizes
-from clodius.utils import TILE_OPTIONS_CHAR
+from clodius.tiles.chromosomes import load_chromsizes
 
 
 def partition_by_adjacent_tiles(tile_ids, dimension=2):
@@ -71,38 +69,6 @@ def partition_by_adjacent_tiles(tile_ids, dimension=2):
             tile_id_lists += [[tile_id]]
 
     return tile_id_lists
-
-
-def infer_filetype(filename):
-    _, ext = op.splitext(filename)
-
-    if ext.lower() == ".bw" or ext.lower() == ".bigwig":
-        return "bigwig"
-    elif ext.lower() == ".mcool" or ext.lower() == ".cool":
-        return "cooler"
-    elif ext.lower() == ".htime":
-        return "time-interval-json"
-    elif ext.lower() == ".hitile":
-        return "hitile"
-    elif ext.lower() == ".beddb":
-        return "beddb"
-    elif ext.lower() == ".mv5":
-        return "multivec"
-
-    return None
-
-
-def infer_datatype(filetype):
-    if filetype == "cooler":
-        return "matrix"
-    if filetype == "bigwig":
-        return "vector"
-    if filetype == "time-interval-json":
-        return "time-interval"
-    if filetype == "hitile":
-        return "vector"
-    if filetype == "beddb":
-        return "bedlike"
 
 
 def tiles_wrapper_1d(tile_ids, tiles_function):
@@ -420,3 +386,111 @@ def genome_tile_to_intervals(filename, chromsizes, tsinfo, z, x):
     chrom_lengths = chromsizes.array
     intervals = abs2genomic(chrom_lengths, tile_info.start[0], tile_info.end[0])
     return intervals
+
+
+# --- merged from the former top-level `clodius.utils` ------------------------
+
+FILETYPES = {
+    "bam": {
+        "description": "Read mappings",
+        "extensions": [".bam"],
+        "datatypes": ["reads", "alignments"],
+    },
+    "chromsizes-tsv": {
+        "description": "Chromosome sizes",
+        "extensions": [".chromsizes", ".fai", ".chrom.sizes"],
+        "datatypes": ["chromsizes"],
+    },
+    "cooler": {
+        "description": "multi-resolution cooler file",
+        "extensions": [".mcool"],
+        "datatypes": ["matrix"],
+    },
+    "bigwig": {
+        "description": "Genomics focused multi-resolution vector file",
+        "extensions": [".bw", ".bigwig"],
+        "datatypes": ["vector"],
+    },
+    "bedfile": {
+        "description": "BED file",
+        "extensions": [".bed", ".bed.gz", ".bed.bgz"],
+        "datatypes": ["bedlike", "gene-annotations"],
+    },
+    "beddb": {
+        "description": "SQLite-based multi-resolution annotation file",
+        "extensions": [".beddb", ".multires.db"],
+        "datatypes": ["bedlike", "gene-annotations"],
+    },
+    "fasta": {
+        "description": "FASTA sequence file",
+        "extensions": [".fa", ".fna", ".fasta"],
+        "datatypes": ["sequence"],
+    },
+    "gff": {
+        "description": "General feature format",
+        "extensions": [".gff", ".gff.gz", ".gff.bgz"],
+        "datatypes": ["bedlike"],
+    },
+    "hitile": {
+        "description": "Multi-resolution vector file",
+        "extensions": [".hitile"],
+        "datatypes": ["vector"],
+    },
+    "multivec": {
+        "description": "Multi-sample vector file",
+        "extensions": [".multivec"],
+        "datatypes": ["multivec"],
+    },
+    "time-interval-json": {
+        "description": "Time interval notation",
+        "extensions": [".htime"],
+        "datatypes": ["time-interval"],
+    },
+}
+
+
+def infer_filetype(filename):
+    for filetype, meta in FILETYPES.items():
+        for ext in meta["extensions"]:
+            if filename.endswith(ext.lower()):
+                return filetype
+
+    return None
+
+
+def infer_datatype(filetype):
+    if filetype in FILETYPES:
+        return FILETYPES[filetype]["datatypes"][0]
+
+    return None
+
+
+def get_file_compression(f) -> str:
+    """Get the compression type for an open file pointer.
+
+    Can recognize 'gz', 'bz2', 'zip' or 'xz' from the magic number.
+
+    :param f: The file pointer
+    :returns: The compression type."""
+    magic_dict = {
+        b"\x1f\x8b\x08": "gzip",
+        b"\x42\x5a\x68": "bz2",
+        b"\x50\x4b\x03\x04": "zip",
+        b"\xfd\x37\x7a\x58\x5a\x00": "xz",
+    }
+
+    max_len = max(len(x) for x in magic_dict)
+
+    prev_pos = f.tell()
+    file_start = f.read(max_len)
+    f.seek(prev_pos)
+
+    for magic, filetype in magic_dict.items():
+        # print("l", len(file_start), "file_start", file_start)
+        if file_start.startswith(magic):
+            return filetype
+
+    return None
+
+
+TILE_OPTIONS_CHAR = ","

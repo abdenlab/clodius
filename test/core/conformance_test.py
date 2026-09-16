@@ -24,11 +24,12 @@ import clodius.tiles.bigwig as bigwig
 import clodius.tiles.cooler as cooler
 import clodius.tiles.fasta as fasta
 
-BIGWIG = op.join(
-    "data", "wgEncodeCaltechRnaSeqHuvecR1x75dTh1014IlnaPlusSignalRep2.bigWig"
+testdir = op.realpath(op.dirname(op.dirname(__file__)))
+
+BIGWIG = op.join(testdir, "data", "wgEncodeCaltechRnaSeqHuvecR1x75dTh1014IlnaPlusSignalRep2.bigWig"
 )
-COOLER = op.join("data", "Dixon2012-J1-NcoI-R1-filtered.100kb.multires.cool")
-FASTA = op.join("data", "GCA_000350705.1_Esch_coli_KTE11_V1_genomic.short.fna")
+COOLER = op.join(testdir, "data", "Dixon2012-J1-NcoI-R1-filtered.100kb.multires.cool")
+FASTA = op.join(testdir, "data", "GCA_000350705.1_Esch_coli_KTE11_V1_genomic.short.fna")
 FASTA_FAI = FASTA + ".fai"
 
 COOLER_BINS_PER_TILE = 256

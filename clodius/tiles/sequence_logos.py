@@ -1,4 +1,4 @@
-from clodius.alignment import (
+from clodius.tiles.alignment import (
     generate_pwm_from_sequences,
     DNA_ALPHABET,
     PROTEIN_ALPHABET,

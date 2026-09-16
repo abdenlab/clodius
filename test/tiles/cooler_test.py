@@ -5,9 +5,11 @@ import numpy as np
 
 import clodius.tiles.cooler as hgco
 
+testdir = op.realpath(op.dirname(op.dirname(__file__)))
+
 
 def test_cooler_info():
-    filename = op.join("data", "Dixon2012-J1-NcoI-R1-filtered.100kb.multires.cool")
+    filename = op.join(testdir, "data", "Dixon2012-J1-NcoI-R1-filtered.100kb.multires.cool")
 
     hgco.tileset_info(filename)
     # TODO: Make assertion about info returned.
@@ -19,5 +21,5 @@ def test_cooler_info():
 
     q = q.reshape((256, 256))
 
-    filename = op.join("data", "hic-resolutions.cool")
+    filename = op.join(testdir, "data", "hic-resolutions.cool")
     # print(hgco.tileset_info(filename))

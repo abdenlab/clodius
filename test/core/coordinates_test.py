@@ -12,7 +12,7 @@ import random
 import pandas as pd
 import pytest
 
-from clodius.chromosomes import chromsizes_as_array
+from clodius.tiles.chromosomes import chromsizes_as_array
 from clodius.core.coords import (
     Chromsizes,
     GenomicRange,
@@ -28,6 +28,8 @@ from clodius.tiles.multivec import abs2genomic as abs2genomic_multivec
 from clodius.tiles.utils import abs2genomic as abs2genomic_utils
 from clodius.tiles.utils import get_quadtree_depth as quadtree_depth_utils
 from clodius.tiles.utils import natsorted as natsorted_utils
+
+testdir = op.realpath(op.dirname(op.dirname(__file__)))
 
 TINY = [["c1", 100], ["c2", 200], ["c3", 50]]
 
@@ -168,7 +170,7 @@ def test_reversed_span_raises():
 def _chromsizes_cases():
     cases = [("tiny", TINY)]
     for name in ("chm13v1.chrom.sizes", "hg38.chrom.sizes"):
-        path = op.join("data", name)
+        path = op.join(testdir, "data", name)
         if op.exists(path):
             cases.append((name, chromsizes_as_array(path)))
     return cases

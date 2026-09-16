@@ -4,7 +4,7 @@ import random
 
 import clodius.tiles.tabix as rtt
 from clodius.tiles.bigwig import abs2genomic
-from clodius.utils import TILE_OPTIONS_CHAR
+from clodius.tiles.utils import TILE_OPTIONS_CHAR
 
 
 def grouper(n, iterable):

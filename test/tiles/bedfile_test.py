@@ -1,12 +1,14 @@
 import os.path as op
 
-import clodius.chromosomes as cc
+import clodius.tiles.chromosomes as cc
 import clodius.tiles.bedfile as ctb
+
+testdir = op.realpath(op.dirname(op.dirname(__file__)))
 
 
 def test_gzip_tiles():
-    valid_filename = op.join("data", "regions.valid.bed.1.gz")
-    chromsizes_fn = op.join("data", "chm13v1.chrom.sizes")
+    valid_filename = op.join(testdir, "data", "regions.valid.bed.1.gz")
+    chromsizes_fn = op.join(testdir, "data", "chm13v1.chrom.sizes")
 
     chromsizes = cc.chromsizes_as_series(chromsizes_fn)
     tiles = ctb.tiles(valid_filename, ["x.0.0"], chromsizes, index_filename=None)
@@ -15,10 +17,10 @@ def test_gzip_tiles():
 
 
 def test_bed_tiles():
-    valid_filename = op.join("data", "regions.valid.bed")
-    invalid_filename = op.join("data", "regions.spaces.bed")
+    valid_filename = op.join(testdir, "data", "regions.valid.bed")
+    invalid_filename = op.join(testdir, "data", "regions.spaces.bed")
 
-    chromsizes_fn = op.join("data", "chm13v1.chrom.sizes")
+    chromsizes_fn = op.join(testdir, "data", "chm13v1.chrom.sizes")
 
     chromsizes = cc.chromsizes_as_series(chromsizes_fn)
     tiles = ctb.tiles(valid_filename, ["x.0.0"], chromsizes, index_filename=None)
@@ -42,8 +44,8 @@ class MockCache:
 
 
 def test_bed_regions():
-    valid_filename = op.join("data", "regions.valid.bed")
-    chromsizes_fn = op.join("data", "chm13v1.chrom.sizes")
+    valid_filename = op.join(testdir, "data", "regions.valid.bed")
+    chromsizes_fn = op.join(testdir, "data", "chm13v1.chrom.sizes")
     chromsizes = cc.chromsizes_as_series(chromsizes_fn)
 
     regions = ctb.regions(valid_filename, chromsizes, 0, 10)
@@ -55,17 +57,17 @@ def test_bed_regions():
 
 
 def test_no_item_rgb():
-    chromsizes_fn = op.join("data", "chm13v1.chrom.sizes")
+    chromsizes_fn = op.join(testdir, "data", "chm13v1.chrom.sizes")
     chromsizes = cc.chromsizes_as_series(chromsizes_fn)
-    filename = op.join("data", "no_item_rgb.bed")
+    filename = op.join(testdir, "data", "no_item_rgb.bed")
 
     ctb.tiles(filename, ["x.0.0"], chromsizes, index_filename=None)
 
 
 def test_indexed_bedfile_tiles():
-    valid_filename = op.join("data", "regions.valid.bed.gz")
-    index_filename = op.join("data", "regions.valid.bed.gz.tbi")
-    chromsizes_fn = op.join("data", "chm13v1.chrom.sizes")
+    valid_filename = op.join(testdir, "data", "regions.valid.bed.gz")
+    index_filename = op.join(testdir, "data", "regions.valid.bed.gz.tbi")
+    chromsizes_fn = op.join(testdir, "data", "chm13v1.chrom.sizes")
 
     chromsizes = cc.chromsizes_as_series(chromsizes_fn)
     tiles = ctb.tiles(

@@ -3,7 +3,7 @@ import sosqlite
 import apsw
 import logging
 
-from clodius.utils import TILE_OPTIONS_CHAR
+from clodius.tiles.utils import TILE_OPTIONS_CHAR
 
 logger = logging.getLogger(__name__)
 

@@ -5,14 +5,14 @@ import clodius.tiles.bedfile as ctb
 import pandas as pd
 import polars as pl
 
-from clodius.utils import get_file_compression
+from clodius.tiles.utils import get_file_compression
 from clodius.models.gff_models import (
     Gene, GeneModel, Pseudogene, PseudogeneModel,
     mRNA, lnc_RNA, primary_transcript, antisense_RNA,
     snoRNA, tRNA, miRNA, Exon, CDS,
 )
 from clodius.tiles.tabix import df_single_tile
-from clodius.utils import TILE_OPTIONS_CHAR
+from clodius.tiles.utils import TILE_OPTIONS_CHAR
 from clodius.tiles.tabix import load_tbi_idx, raw_tabix_fetcher, single_indexed_tile
 from smart_open import open
 from uuid import uuid4

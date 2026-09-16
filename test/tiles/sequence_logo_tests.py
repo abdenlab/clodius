@@ -13,7 +13,7 @@ class TestSequenceLogos(unittest.TestCase):
         records = [SeqRecord(Seq(seq), id=f"seq{i}") for i, seq in enumerate(sequences)]
         return MultipleSeqAlignment(records)
 
-    @patch("clodius.alignment.run_clustal_omega")
+    @patch("clodius.tiles.alignment.run_clustal_omega")
     def test_dna_sequences(self, mock_clustal):
         """Test tile_functions with DNA sequences"""
         sequences = ["ATCG", "ATGG", "ACCG"]
@@ -38,7 +38,7 @@ class TestSequenceLogos(unittest.TestCase):
         self.assertEqual(tile_data["dtype"], "float16")
         self.assertEqual(tile_data["shape"], [4, 128])
 
-    @patch("clodius.alignment.run_clustal_omega")
+    @patch("clodius.tiles.alignment.run_clustal_omega")
     def test_protein_sequences(self, mock_clustal):
         """Test tile_functions with protein sequences"""
         sequences = ["ACDE", "ACDF", "ACDG"]
@@ -58,7 +58,7 @@ class TestSequenceLogos(unittest.TestCase):
         tile_data = result["tiles"](0, 0)
         self.assertEqual(tile_data["shape"], [20, 128])
 
-    @patch("clodius.alignment.run_clustal_omega")
+    @patch("clodius.tiles.alignment.run_clustal_omega")
     def test_invalid_seqtype(self, mock_clustal):
         """Test that invalid seqtype raises ValueError"""
         sequences = ["ATCG"]
@@ -66,7 +66,7 @@ class TestSequenceLogos(unittest.TestCase):
         with self.assertRaises(ValueError):
             tile_functions(sequences, seqtype="invalid")
 
-    @patch("clodius.alignment.run_clustal_omega")
+    @patch("clodius.tiles.alignment.run_clustal_omega")
     def test_empty_sequences(self, mock_clustal):
         """Test with empty sequences list"""
         sequences = []
