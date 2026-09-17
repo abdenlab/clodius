@@ -127,6 +127,11 @@ class BaseTileset:
 
     modifiers: ClassVar[ModifierSpec | None] = None
     options: ClassVar[frozenset[str]] = frozenset()
+    # Overridden by every real tileset. Declared here so that a subclass which
+    # forgets it raises MalformedTileId from `TileId.parse` rather than
+    # AttributeError -- which is not a TilesetError, and so escapes the server
+    # boundary as a 500.
+    ndim: ClassVar[int] = 0
 
     tile_size: int
     policy: TilePolicy
@@ -135,9 +140,12 @@ class BaseTileset:
         """Parse against this tileset's declared shape."""
         return TileId.parse(
             tile_id,
-            ndim=self.ndim,  # type: ignore[attr-defined]
+            ndim=self.ndim,
             modifiers=self.modifiers,
-            options=self.options or None,
+            # Passed through unchanged. `self.options or None` would collapse
+            # an empty frozenset to `None` -- "accept any option" -- which is
+            # the opposite of what an empty set declares.
+            options=self.options,
         )
 
     def close(self) -> None:
