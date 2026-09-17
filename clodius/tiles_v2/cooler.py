@@ -488,7 +488,20 @@ class CoolerTileset(BaseTileset):
             if c not in BIN_COORDINATE_COLUMNS and c in shared
         ]
 
-        info = TilesetInfo(
+        # No max_width: for an explicit ladder the extent belongs to the zoom
+        # level, not the tileset, and Canvas derives it per level. Emitting a
+        # single value taken from the coarsest resolution is only correct for a
+        # power-of-two ladder; on the 4DN standard set it over-reports n_tiles
+        # at every finer zoom (200 vs 121 at z=6).
+        #
+        # `mirror_tiles` is passed as a constructor keyword rather than
+        # assigned afterwards: TilesetInfo is frozen, and its cached
+        # derivations are only sound because it is.
+        extras = {}
+        if clr.info.get("storage-mode") == "square":
+            extras["mirror_tiles"] = "false"
+
+        return TilesetInfo(
             min_pos=[1, 1],
             max_pos=[chromsizes.total_length, chromsizes.total_length],
             resolutions=list(resolutions),
@@ -498,10 +511,8 @@ class CoolerTileset(BaseTileset):
                 {"name": TRANSFORM_LABELS.get(c, c), "value": c}
                 for c in transforms
             ],
+            **extras,
         )
-        if clr.info.get("storage-mode") == "square":
-            info.mirror_tiles = "false"
-        return info
 
     def _tile(self, tid: TileId, reader: BlockReader):
         x, y = tid.pos
