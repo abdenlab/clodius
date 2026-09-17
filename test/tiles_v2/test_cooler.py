@@ -17,6 +17,7 @@ committed multires cooler is a legacy implicit-ladder file with no
 
 import pytest
 
+from clodius.core.errors import UnsupportedOption
 from clodius.core.tileid import TileId
 from clodius.tiles_v2.cooler import CoolerTileset
 
@@ -82,6 +83,28 @@ def test_info_should_omit_the_flag_for_a_half_matrix(symmetric_mcool):
 
     # Assert
     assert "mirror_tiles" not in served
+
+
+def test_parse_tile_id_should_reject_an_option(symmetric_mcool):
+    """Test the empty option declaration on a shipped tileset.
+
+    Given:
+        A cooler tileset, which declares that it recognizes no ``,key:value``
+        options at all, and a tile id carrying one.
+    When:
+        The id is parsed.
+    Then:
+        It should raise ``UnsupportedOption``. An empty declaration collapsing
+        into "accept anything" is the kind of defect that only shows up on a
+        real tileset, because every tileset inherits the empty default and
+        none of them would notice.
+    """
+    # Arrange
+    tileset = CoolerTileset(symmetric_mcool)
+
+    # Act & assert
+    with pytest.raises(UnsupportedOption, match="bogus"):
+        tileset.parse_tile_id("u.0.0.0,bogus:1")
 
 
 def test_tiles_should_raise_when_the_file_cannot_be_opened():

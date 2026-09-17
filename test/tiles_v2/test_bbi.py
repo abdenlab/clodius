@@ -23,6 +23,7 @@ import numpy as np
 import pybigtools
 import pytest
 
+from clodius.core.policies import TilePolicy
 from clodius.tiles_v2.bbi import BBIAnnotationTileset, BBISignalTileset
 
 #: Totals 3000 bp, which a four-bin tile size covers with a quadtree extent of
@@ -155,6 +156,31 @@ def test_tiles_should_hold_one_bin_per_tile_slot(bigwig):
 
     # Assert
     assert bin_count(payload) == TILE_SIZE
+
+
+def test_tiles_should_return_nothing_when_the_cap_is_zero(bigbed):
+    """Test the record cap end to end, through a real tileset.
+
+    Given:
+        An annotation tileset over a bigBed holding three features, under a
+        policy capping records at zero.
+    When:
+        The whole-genome tile is served.
+    Then:
+        It should return no records. A server configured to serve none must
+        not emit an unbounded tile, and the slice that implements the cap
+        silently inverts at zero to mean "everything".
+    """
+    # Arrange
+    tileset = BBIAnnotationTileset(
+        bigbed, tile_size=TILE_SIZE, policy=TilePolicy(max_records=0)
+    )
+
+    # Act
+    (_, records), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+    # Assert
+    assert records == []
 
 
 def test_tiles_should_return_an_error_payload_for_a_tile_off_the_canvas(
