@@ -27,8 +27,24 @@ TILE_OPTIONS_CHAR = ","
 
 
 def _is_int(text: str) -> bool:
-    """Whether a dotted part is a coordinate rather than a modifier."""
-    return text.isdigit() or (text[:1] == "-" and text[1:].isdigit())
+    """Whether a dotted part is a coordinate rather than a modifier.
+
+    A leading ``-`` counts, so that a negative coordinate is read as the
+    coordinate it is and rejected by :meth:`TileId.parse` with a message
+    naming the problem, rather than falling through to the modifier slot.
+
+    ASCII decimal digits only, which is narrower than both of the obvious
+    spellings. ``int`` would accept ``+5`` and ``1_0`` -- two id strings for
+    one tile, echoed back under the key the client sent. ``str.isdigit`` is
+    the opposite error: it admits superscripts, which ``int`` then rejects
+    with a bare ``ValueError`` that is not a
+    :class:`~clodius.core.errors.TilesetError` and escapes the server
+    boundary as a 500. ``str.isdecimal`` still admits fullwidth digits, where
+    ``int`` succeeds and ``abc.3.１`` silently denotes tile 1.
+    """
+    return text.isascii() and (
+        text.isdecimal() or (text[:1] == "-" and text[1:].isdecimal())
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +142,16 @@ class TileId:
         slots from modifiers: with the arity fixed, a trailing non-numeric part
         is unambiguously the modifier.
         """
+        # Checked before the id itself. A tileset that mis-declares its arity
+        # would otherwise reach the coordinate slice below and raise a bare
+        # `ValueError`, which is not a `TilesetError` and so escapes the
+        # server boundary as a 500 rather than a renderable per-tile error.
+        if ndim < 1:
+            raise MalformedTileId(
+                f"invalid arity {ndim} declared for {tile_id!r}; a tile id "
+                f"needs at least one coordinate"
+            )
+
         head, _, opt_str = tile_id.partition(TILE_OPTIONS_CHAR)
 
         parsed_options: list[tuple[str, str]] = []
@@ -144,9 +170,6 @@ class TileId:
                 parsed_options.append((key, value))
 
         parts = head.split(".")
-        if ndim < 1:
-            raise ValueError(f"ndim must be at least 1, got {ndim}")
-
         expected = 1 + 1 + ndim  # uid + z + coords
         if len(parts) < expected or not all(
             _is_int(p) for p in parts[1:expected]
@@ -158,6 +181,18 @@ class TileId:
 
         uid = parts[0]
         numbers = [int(p) for p in parts[1:expected]]
+
+        # Validated here rather than downstream. A negative position otherwise
+        # reaches `Chromsizes.invert`, which raises a plain `ValueError` -- and
+        # a `ValueError` is not a `TilesetError`, so the server boundary cannot
+        # render it into a per-tile error payload and a single malformed id
+        # takes down the whole batch.
+        if numbers[0] < 0:
+            raise MalformedTileId(
+                f"negative zoom level {numbers[0]} in {tile_id!r}"
+            )
+        if any(n < 0 for n in numbers[1:]):
+            raise MalformedTileId(f"negative tile position in {tile_id!r}")
 
         modifier_parts = parts[expected:]
         if len(modifier_parts) > 1:

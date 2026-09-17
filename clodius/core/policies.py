@@ -267,16 +267,24 @@ def stable_importance(key: str) -> float:
     Uses the same digest the record's ``uid`` already comes from, so no new
     hashing is introduced.
     """
-    digest = hashlib.md5(key.encode("utf8")).hexdigest()
+    # `usedforsecurity=False` marks this as a bucketing hash rather than a
+    # security primitive, so it keeps working on a FIPS-enforcing build where
+    # md5 is otherwise refused.
+    digest = hashlib.md5(key.encode("utf8"), usedforsecurity=False).hexdigest()
     return int(digest[:8], 16) / 0x1_0000_0000
 
 
 def take_most_important(
     records: Sequence[T],
-    cap: int,
+    cap: int | None,
     importance: Callable[[T], float],
 ) -> list[T]:
     """The ``cap`` most important records, in their original order.
+
+    ``cap`` of ``None`` means no limit, matching :class:`TilePolicy`. A ``cap``
+    of zero or less returns nothing: ``ranked[-0:]`` is the whole list, so
+    without this guard a server configured to serve no records would emit an
+    unbounded tile -- the precise failure the cap exists to prevent.
 
     Deterministic, unlike ``random.choices``, which additionally samples *with
     replacement* and so can return the same record twice while dropping another
@@ -286,6 +294,10 @@ def take_most_important(
     records by coordinate, and keeping genomic order makes the output easier to
     diff against the unthinned set.
     """
+    if cap is None:
+        return list(records)
+    if cap <= 0:
+        return []
     if len(records) <= cap:
         return list(records)
 

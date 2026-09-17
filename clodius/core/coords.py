@@ -20,6 +20,8 @@ from typing import Iterable, Iterator, Literal
 import bioframe
 import numpy as np
 
+from clodius.core.errors import TileOutOfBounds
+
 
 @dataclass(frozen=True, slots=True)
 class GenomicRange:
@@ -298,6 +300,22 @@ class TileCanvas:
     max_width: int
     chromsizes: Chromsizes | None = None
 
+    def __post_init__(self):
+        # TilesetInfo validates these upstream, but TileCanvas is re-exported
+        # from clodius.core and can be constructed directly -- where a zero
+        # tile size or binsize surfaced as ZeroDivisionError from a property,
+        # and a negative extent constructed silently.
+        if self.binsize <= 0:
+            raise ValueError(f"binsize must be positive, got {self.binsize}")
+        if self.tile_size <= 0:
+            raise ValueError(
+                f"tile_size must be positive, got {self.tile_size}"
+            )
+        if self.max_width < 0:
+            raise ValueError(
+                f"max_width must be non-negative, got {self.max_width}"
+            )
+
     @property
     def span(self) -> tuple[int, int]:
         """Absolute ``[start, end)`` the whole canvas covers."""
@@ -336,11 +354,25 @@ class TileCanvas:
         yield from range(first, last + 1)
 
     def invert(self, x: int) -> Iterator[GenomicRange]:
-        """Genomic intervals covered by tile ``x``."""
+        """Genomic intervals covered by tile ``x``.
+
+        Raises
+        ------
+        TileOutOfBounds
+            If ``x`` does not exist at this zoom. Tiles past the end of the
+            *genome* but inside the canvas are in range -- that padding is
+            what fills the trailing NaN bins of low-zoom tiles. Only positions
+            past the end of the *canvas* are rejected.
+        """
         if self.chromsizes is None:
             raise ValueError(
                 "canvas has no chromsizes, so tile locations cannot be "
                 "inverted to genomic intervals"
+            )
+        if x < 0 or x >= self.n_tiles:
+            raise TileOutOfBounds(
+                f"tile position {x} is outside the {self.n_tiles} tiles at "
+                f"zoom {self.z}"
             )
         return self.chromsizes.invert(self.tile_span(x))
 

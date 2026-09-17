@@ -127,6 +127,11 @@ class BaseTileset:
 
     modifiers: ClassVar[ModifierSpec | None] = None
     options: ClassVar[frozenset[str]] = frozenset()
+    # Overridden by every real tileset. Declared here so that a subclass which
+    # forgets it raises MalformedTileId from `TileId.parse` rather than
+    # AttributeError -- which is not a TilesetError, and so escapes the server
+    # boundary as a 500.
+    ndim: ClassVar[int] = 0
 
     tile_size: int
     policy: TilePolicy
@@ -135,9 +140,12 @@ class BaseTileset:
         """Parse against this tileset's declared shape."""
         return TileId.parse(
             tile_id,
-            ndim=self.ndim,  # type: ignore[attr-defined]
+            ndim=self.ndim,
             modifiers=self.modifiers,
-            options=self.options or None,
+            # Passed through unchanged. `self.options or None` would collapse
+            # an empty frozenset to `None` -- "accept any option" -- which is
+            # the opposite of what an empty set declares.
+            options=self.options,
         )
 
     def close(self) -> None:
@@ -216,7 +224,19 @@ class DatasetInfo(BaseModel):
 
 
 class TilesetInfo(DatasetInfo):
-    """A :class:`DatasetInfo` that also carries a resolution ladder."""
+    """A :class:`DatasetInfo` that also carries a resolution ladder.
+
+    Frozen. The `coordinate_system` cached on it is only sound because the
+    field it reads cannot change underneath it.
+
+    Derive a variant with ``model_copy(update=...)``, bearing in mind that it
+    neither validates the update nor drops the cache: a misspelled key is
+    served verbatim, an out-of-range value is accepted where the constructor
+    would reject it, and a copy updating ``chromsizes`` keeps the coordinate
+    system derived from the old ones. Prefer constructing when either matters.
+    """
+
+    model_config = ConfigDict(extra="allow", frozen=True)
 
     # --- ladder, implicit form (power-of-two) ---
     max_zoom: int | None = None
