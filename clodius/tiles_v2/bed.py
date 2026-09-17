@@ -7,7 +7,7 @@ import oxbow as ox
 import polars as pl
 
 from clodius.core.coords import Chromsizes, GenomicRange
-from clodius.core.errors import TilesetUnavailable
+from clodius.core.errors import TileError, TilesetUnavailable
 from clodius.core.tile import AnnotationRecord
 from clodius.core.policies import TilePolicy
 from clodius.core.tileid import TileId
@@ -177,7 +177,14 @@ class BedTileset(BaseTileset):
     def tiles(
         self, ids: Sequence[TileId], options=None
     ) -> list[tuple[TileId, list[AnnotationRecord]]]:
-        return [(tid, self._tile(tid)) for tid in ids]
+        """One entry per requested id; a refusal rides in the payload slot."""
+        out = []
+        for tid in ids:
+            try:
+                out.append((tid, self._tile(tid)))
+            except TileError as exc:
+                out.append((tid, exc.to_dict()))
+        return out
 
     def close(self) -> None:
         # oxbow sources are opened per query and own no persistent handle, so

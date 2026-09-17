@@ -8,6 +8,7 @@ import numpy as np
 import pybigtools
 
 from clodius.core.coords import Chromsizes, GenomicRange, natsorted
+from clodius.core.errors import TileError
 from clodius.core.policies import (
     LinkPolicy,
     TilePolicy,
@@ -121,7 +122,14 @@ class BBITileset(BaseTileset):
     def tiles(
         self, ids: Sequence[TileId], options=None
     ) -> list[tuple[TileId, DenseTilePayload | list[AnnotationRecord]]]:
-        return [(tid, self._tile(tid)) for tid in ids]
+        """One entry per requested id; a refusal rides in the payload slot."""
+        out = []
+        for tid in ids:
+            try:
+                out.append((tid, self._tile(tid)))
+            except TileError as exc:
+                out.append((tid, exc.to_dict()))
+        return out
 
     # --- internals ----------------------------------------------------------
 

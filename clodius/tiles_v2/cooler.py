@@ -453,10 +453,35 @@ class CoolerTileset(BaseTileset):
             canvas = self.info().canvas(z)
             clr = self._cooler(canvas.binsize)
             balance = resolve_balance(clr, modifier)
+
+            # One entry per requested id; a refusal rides in the payload slot.
+            #
+            # Positions are screened before the prefetch rather than inside
+            # the serving loop, because the prefetch reads every position in
+            # the batch up front: one off-lattice id would raise there and
+            # take its fifteen well-formed neighbours down with it, which is
+            # the whole failure this guard exists to prevent. `invert` is the
+            # canonical check, so the bounds test is not restated here.
+            servable = []
+            for i in indices:
+                try:
+                    for pos in ids[i].pos:
+                        canvas.invert(pos)
+                except TileError as exc:
+                    payloads[i] = exc.to_dict()
+                else:
+                    servable.append(i)
+
+            # The catch stays narrow. An unopenable file is a whole-request
+            # failure, and answering with sixteen cheerful error payloads
+            # would be a lie -- which is what the cooler test asserts.
             with self.reader(clr, canvas, balance) as reader:
-                reader.prefetch(ids[i].pos for i in indices)
-                for i in indices:
-                    payloads[i] = self._tile(ids[i], reader)
+                reader.prefetch(ids[i].pos for i in servable)
+                for i in servable:
+                    try:
+                        payloads[i] = self._tile(ids[i], reader)
+                    except TileError as exc:
+                        payloads[i] = exc.to_dict()
         return [(tid, payloads[i]) for i, tid in enumerate(ids)]
 
     # --- internals ----------------------------------------------------------

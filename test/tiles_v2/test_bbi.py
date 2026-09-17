@@ -157,3 +157,33 @@ def test_tiles_should_hold_one_bin_per_tile_slot(bigwig):
     assert bin_count(payload) == TILE_SIZE
 
 
+def test_tiles_should_return_an_error_payload_for_a_tile_off_the_canvas(
+    bigwig,
+):
+    """Test that one bad position does not take the batch with it.
+
+    Given:
+        A batch of two tile ids, one inside the canvas and one past its last
+        tile.
+    When:
+        The batch is served.
+    Then:
+        Both entries should come back, the second an error payload naming the
+        refusal. A client batches sixteen tiles per request, and a single bad
+        position raising through ``tiles()`` discards the fifteen that were
+        servable.
+    """
+    # Arrange
+    tileset = BBISignalTileset(bigwig, tile_size=TILE_SIZE)
+    n_tiles = tileset.info().canvas(1).n_tiles
+    ids = [
+        tileset.parse_tile_id("u.1.0"),
+        tileset.parse_tile_id(f"u.1.{n_tiles}"),
+    ]
+
+    # Act
+    results = tileset.tiles(ids)
+
+    # Assert
+    assert bin_count(results[0][1]) == TILE_SIZE
+    assert results[1][1]["error_type"] == "TileOutOfBounds"
