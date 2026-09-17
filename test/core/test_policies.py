@@ -11,9 +11,11 @@ slice that implements the limit reads ``ranked[-cap:]``, which silently
 inverts at zero.
 """
 
+import hashlib
 
+import pytest
 
-from clodius.core.policies import take_most_important
+from clodius.core.policies import stable_importance, take_most_important
 
 #: Importance values as this implementation produces them today, recorded so
 #: that a change of digest, encoding, slice or divisor has to be deliberate.
@@ -158,6 +160,100 @@ def test_take_most_important_should_return_nothing_when_there_are_no_records():
     """
     # Act & assert
     assert take_most_important([], 5, identity) == []
+
+
+@pytest.mark.parametrize("key", sorted(GOLDEN), ids=lambda k: repr(k))
+def test_stable_importance_should_equal_its_recorded_value(key):
+    """Test the property the whole ranking rests on.
+
+    Given:
+        A feature key -- empty, ASCII, and non-ASCII -- with the value this
+        implementation produced when the test was written.
+    When:
+        Its importance is derived.
+    Then:
+        It should equal that value exactly. The ranking has to be identical
+        across processes, workers and releases, not merely within one call:
+        a tile cached by one worker and a tile served by another must agree on
+        which records survived thinning, and a feature that survives at one
+        zoom must survive at the next.
+    """
+    # Act
+    result = stable_importance(key)
+
+    # Assert
+    assert result == GOLDEN[key]
+
+
+def test_stable_importance_should_distinguish_different_keys():
+    """Test that the digest discriminates rather than merely returning.
+
+    Given:
+        A thousand distinct feature keys.
+    When:
+        Their importance is derived.
+    Then:
+        Every value should differ. A ranking that collapses keys into a few
+        buckets thins arbitrarily within each one, which is the failure a
+        constant return value or a truncated digest produces.
+    """
+    # Act
+    values = {stable_importance(f"chr1:{i}-{i + 10}") for i in range(1000)}
+
+    # Assert
+    assert len(values) == 1000
+
+
+def test_stable_importance_should_return_a_value_in_the_unit_interval():
+    """Test the documented range.
+
+    Given:
+        An assortment of feature keys.
+    When:
+        Their importance is derived.
+    Then:
+        It should fall in ``[0, 1)``, which is what lets the value stand in
+        for a precomputed score.
+    """
+    # Act
+    values = [stable_importance(f"chr1:{i}-{i + 10}") for i in range(64)]
+
+    # Assert
+    assert all(0.0 <= v < 1.0 for v in values)
+
+
+def test_stable_importance_should_return_a_value_when_md5_is_restricted(
+    monkeypatch,
+):
+    """Test the digest against a build that refuses md5 as a security hash.
+
+    Given:
+        A ``hashlib.md5`` that raises unless told the digest is not being used
+        for security, as it does on a FIPS-enforcing build.
+    When:
+        A key's importance is derived.
+    Then:
+        It should return the same value every other host does. Asserting only
+        that some number comes back would also pass for an implementation that
+        catches the error and falls back to another digest -- the most likely
+        way someone "fixes" a FIPS failure -- which silently gives those hosts
+        a different ranking from the rest of the fleet.
+    """
+    # Arrange
+    real_md5 = hashlib.md5
+
+    def fips_md5(data=b"", *, usedforsecurity=True):
+        if usedforsecurity:
+            raise ValueError("[digital envelope routines] unsupported")
+        return real_md5(data, usedforsecurity=False)
+
+    monkeypatch.setattr(hashlib, "md5", fips_md5)
+
+    # Act
+    result = stable_importance("chr1:100-200")
+
+    # Assert
+    assert result == GOLDEN["chr1:100-200"]
 
 
 def test_take_most_important_should_return_a_new_list():
