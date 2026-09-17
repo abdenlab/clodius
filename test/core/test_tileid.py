@@ -114,6 +114,34 @@ def test_parse_should_raise_a_tileset_error_for_any_rejection(tile_id, ndim):
         TileId.parse(tile_id, ndim=ndim)
 
 
+def test_parse_should_raise_when_a_coordinate_is_not_ascii_decimal():
+    """Test the spellings a bare int conversion would accept.
+
+    Given:
+        A coordinate written with a sign, a digit separator, a superscript, or
+        a fullwidth digit.
+    When:
+        The id is parsed.
+    Then:
+        It should raise ``MalformedTileId`` for all of them. Two of these are
+        wrong answers rather than crashes -- ``int("1_0")`` is 10 and
+        ``int("\uff11")`` is 1 -- so the client receives another tile's data
+        under the key it asked for. The superscript is the crash: ``isdigit``
+        admits it and ``int`` rejects it, and the resulting ``ValueError`` is
+        not a ``TilesetError``, so it escapes the boundary as a 500.
+    """
+    # Act & assert
+    for tile_id in (
+        "abc.3.+5",
+        "abc.3.1_0",
+        "abc.+3.5",
+        "abc.3.\u00b2",
+        "abc.3.\uff11",
+    ):
+        with pytest.raises(MalformedTileId):
+            TileId.parse(tile_id, ndim=1)
+
+
 def test_parse_should_raise_when_there_are_too_few_positions():
     """Test an id shorter than the declared arity.
 

@@ -27,8 +27,24 @@ TILE_OPTIONS_CHAR = ","
 
 
 def _is_int(text: str) -> bool:
-    """Whether a dotted part is a coordinate rather than a modifier."""
-    return text.isdigit() or (text[:1] == "-" and text[1:].isdigit())
+    """Whether a dotted part is a coordinate rather than a modifier.
+
+    A leading ``-`` counts, so that a negative coordinate is read as the
+    coordinate it is and rejected by :meth:`TileId.parse` with a message
+    naming the problem, rather than falling through to the modifier slot.
+
+    ASCII decimal digits only, which is narrower than both of the obvious
+    spellings. ``int`` would accept ``+5`` and ``1_0`` -- two id strings for
+    one tile, echoed back under the key the client sent. ``str.isdigit`` is
+    the opposite error: it admits superscripts, which ``int`` then rejects
+    with a bare ``ValueError`` that is not a
+    :class:`~clodius.core.errors.TilesetError` and escapes the server
+    boundary as a 500. ``str.isdecimal`` still admits fullwidth digits, where
+    ``int`` succeeds and ``abc.3.１`` silently denotes tile 1.
+    """
+    return text.isascii() and (
+        text.isdecimal() or (text[:1] == "-" and text[1:].isdecimal())
+    )
 
 
 @dataclass(frozen=True, slots=True)
