@@ -388,13 +388,17 @@ class BBIInteraction2DTileset(BBIInteractionTileset):
         canvas = self._info_for(chromsizes).canvas(tid.z)
         x, y = tid.pos
 
-        # The index is on the hull, so a query on the tile's x column returns
-        # every candidate; the y column is filtered here.
+        # The query is by hull, which also catches interactions that merely
+        # pass over the column, so both anchors are checked here.
+        x_lo, x_hi = canvas.tile_span(x)
         y_lo, y_hi = canvas.tile_span(y)
         rows = [
             r
             for r in self._interactions(chromsizes, canvas, x)
-            if r["yStart"] < y_hi and r["yEnd"] > y_lo
+            if r["xStart"] < x_hi
+            and r["xEnd"] > x_lo
+            and r["yStart"] < y_hi
+            and r["yEnd"] > y_lo
         ]
         return self._capped(rows)
 
