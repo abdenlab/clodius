@@ -82,10 +82,23 @@ def overlap_predicate(
     return expr
 
 
-def to_tile_record(row: dict, offsets: dict[str, int]) -> AnnotationRecord:
-    """One materialized row as the client's bedlike shape."""
+def to_tile_record(
+    row: dict, offsets: dict[str, int]
+) -> AnnotationRecord | None:
+    """One materialized row as the client's bedlike shape.
+
+    ``None`` when the record's contig is absent from ``offsets`` -- an
+    unplaced contig, a naming mismatch, a different assembly build, or a
+    header line parsed as a record. The row has no position on the
+    genome-spanning axis, so it is skipped rather than raising: a bare
+    ``KeyError`` is not a :class:`~clodius.core.errors.TileError` and would
+    escape the server boundary as a 500. Handled here rather than at the call
+    sites so a third caller cannot reintroduce it.
+    """
     chrom, start, end = row["chrom"], row["start"], row["end"]
-    offset = offsets[chrom]
+    offset = offsets.get(chrom)
+    if offset is None:
+        return None
     rest = row["rest"]
     fields = [chrom, str(start), str(end)]
     if rest:
@@ -187,9 +200,11 @@ class BedTileset(BaseTileset):
             .with_columns(_digest=self._digest_expr())
             .collect(engine="streaming")
         )
+        offsets = self._chromsizes.offsets
         rows = [
-            to_tile_record(r, self._chromsizes.offsets)
+            record
             for r in frame.to_dicts()
+            if (record := to_tile_record(r, offsets)) is not None
         ]
         has_next = len(rows) > limit
         return [
@@ -244,7 +259,6 @@ class BedTileset(BaseTileset):
 
     def _tile(self, tid: TileId) -> list[AnnotationRecord]:
         ranges = list(self._info.canvas(tid.z).invert(tid.pos[0]))
-
         if self._is_indexed:
             frame = self._scan(
                 [
@@ -259,7 +273,13 @@ class BedTileset(BaseTileset):
             if predicate is not None:
                 frame = frame.filter(predicate)
 
-        frame = frame.with_columns(_digest=self._digest_expr())
+        offsets = self._chromsizes.offsets
+
+        # Filtered before capping: an unknown contig that consumed a cap slot
+        # would silently shorten the tile.
+        frame = frame.filter(pl.col("chrom").is_in(list(offsets))).with_columns(
+            _digest=self._digest_expr()
+        )
 
         # Bounded-memory downsampling: `top_k` keeps a heap of `cap` rows, so
         # peak memory does not depend on how many records the tile covers.
@@ -268,11 +288,10 @@ class BedTileset(BaseTileset):
             frame = frame.top_k(cap, by="_digest")
 
         rows = frame.collect(engine="streaming").to_dicts()
-        offsets = self._chromsizes.offsets
         records = [
-            to_tile_record(row, offsets)
+            record
             for row in rows
-            if row["chrom"] in offsets
+            if (record := to_tile_record(row, offsets)) is not None
         ]
         records.sort(key=lambda r: r["xStart"])
         return records
