@@ -1,0 +1,250 @@
+"""Tests for clodius.core.policies.
+
+Only the two functions whose guards this branch restores: the record cap, and
+the digest the cap ranks on. The rest of the module -- ``TilePolicy``,
+``LinkPolicy``, ``reconcile``, ``reconcile_2d`` -- is covered when the full
+suite lands.
+
+A cap is a safety limit, so its edges are the whole point: zero and ``None``
+sit next to each other in the signature and mean opposite things, and the
+slice that implements the limit reads ``ranked[-cap:]``, which silently
+inverts at zero.
+"""
+
+
+
+from clodius.core.policies import take_most_important
+
+#: Importance values as this implementation produces them today, recorded so
+#: that a change of digest, encoding, slice or divisor has to be deliberate.
+#: A same-process double call cannot do this job: it proves only that the
+#: function is not random, and a ``hash(key)`` implementation -- which
+#: reshuffles on every interpreter restart -- passes it green.
+GOLDEN = {
+    "": 0.8285759000573307,
+    "chr1:100-200": 0.14890028489753604,
+    "contig-\u00e9\u4e2d": 0.5237986561842263,
+}
+
+
+def identity(x):
+    """Rank a record by its own value."""
+    return x
+
+
+def test_take_most_important_should_return_everything_when_under_the_cap():
+    """Test the pass-through case.
+
+    Given:
+        Fewer records than the cap.
+    When:
+        They are thinned.
+    Then:
+        It should return all of them, in their original order.
+    """
+    # Act
+    result = take_most_important([1, 2, 3], 10, identity)
+
+    # Assert
+    assert result == [1, 2, 3]
+
+
+def test_take_most_important_should_return_everything_when_cap_is_exact():
+    """Test the inclusive boundary.
+
+    Given:
+        Exactly as many records as the cap.
+    When:
+        They are thinned.
+    Then:
+        It should return all of them, pinning that the comparison is
+        inclusive rather than off by one.
+    """
+    # Act
+    result = take_most_important([1, 2, 3], 3, identity)
+
+    # Assert
+    assert result == [1, 2, 3]
+
+
+def test_take_most_important_should_keep_the_ranked_records_in_input_order():
+    """Test that thinning preserves genomic order rather than rank order.
+
+    Given:
+        More records than the cap, arranged so the two survivors appear in the
+        input in the opposite order to their rank.
+    When:
+        They are thinned.
+    Then:
+        It should return the highest-ranked ones in input order -- ``[4, 5]``,
+        not ``[5, 4]``. The arrangement is what makes that observable: with
+        the survivors already in descending rank, input order and rank order
+        are the same list and reversing the output changes nothing.
+    """
+    # Act
+    result = take_most_important([4, 5, 1, 2, 3], 2, identity)
+
+    # Assert
+    assert result == [4, 5]
+
+
+def test_take_most_important_should_return_nothing_when_cap_is_zero():
+    """Test the guard against an unbounded tile.
+
+    Given:
+        A non-empty record list and a cap of zero, as a server configured to
+        serve no records would supply.
+    When:
+        The records are thinned.
+    Then:
+        It should return nothing. Without the guard ``ranked[-0:]`` is the
+        whole list, so the cap emits everything it exists to suppress.
+    """
+    # Act
+    result = take_most_important([1, 2, 3], 0, identity)
+
+    # Assert
+    assert result == []
+
+
+def test_take_most_important_should_return_nothing_when_cap_is_negative():
+    """Test the negative cap, a distinct branch from zero and from None.
+
+    Given:
+        A non-empty record list and a cap of minus one.
+    When:
+        The records are thinned.
+    Then:
+        It should return nothing.
+    """
+    # Act
+    result = take_most_important([1, 2, 3], -1, identity)
+
+    # Assert
+    assert result == []
+
+
+def test_take_most_important_should_return_everything_when_cap_is_none():
+    """Test that None means no limit, matching TilePolicy.
+
+    Given:
+        A record list and a cap of None, which is what ``TilePolicy`` supplies
+        when ``max_records`` is unset.
+    When:
+        The records are thinned.
+    Then:
+        It should return all of them rather than raising on the length
+        comparison.
+    """
+    # Act
+    result = take_most_important([1, 2, 3], None, identity)
+
+    # Assert
+    assert result == [1, 2, 3]
+
+
+def test_take_most_important_should_return_nothing_when_there_are_no_records():
+    """Test the empty input.
+
+    Given:
+        An empty record list and a positive cap.
+    When:
+        The records are thinned.
+    Then:
+        It should return an empty list rather than raising. No branch of the
+        current implementation is falsified by this -- both the pass-through
+        and the ranked path reach ``[]`` -- so it stands as a no-raise smoke
+        test rather than as coverage of the cap.
+    """
+    # Act & assert
+    assert take_most_important([], 5, identity) == []
+
+
+def test_take_most_important_should_return_a_new_list():
+    """Test that the caller's own sequence is never handed back.
+
+    Given:
+        Records supplied as a tuple, under each cap that passes them through
+        unthinned.
+    When:
+        They are thinned.
+    Then:
+        It should be a new list every time. The bigBed path hands this result
+        straight out as the tile payload, so returning the caller's sequence
+        would alias a tileset's own state into a response.
+    """
+    # Arrange
+    records = (1, 2, 3)
+
+    # Act
+    results = [take_most_important(records, cap, identity) for cap in (None, 10, 3)]
+
+    # Assert
+    assert all(isinstance(r, list) and r == [1, 2, 3] for r in results)
+
+
+def test_take_most_important_should_keep_one_record_per_cap_slot():
+    """Test that the cap counts records, not distinct importances.
+
+    Given:
+        Three records of which two rank identically, and a cap of one.
+    When:
+        They are thinned.
+    Then:
+        It should return exactly one record. Selecting by value rather than by
+        position returns both of the tied records here -- twice the cap, from
+        an implementation that looks correct and passes every other test in
+        this file.
+    """
+    # Act
+    result = take_most_important([3, 3, 1], 1, identity)
+
+    # Assert
+    assert result == [3]
+
+
+def test_take_most_important_should_accept_an_unhashable_record():
+    """Test the shape the only caller actually passes.
+
+    Given:
+        Records as dicts, ranked by their ``importance`` key, as the bigBed
+        tileset supplies them.
+    When:
+        They are thinned to two.
+    Then:
+        It should return the two highest. A value-keyed implementation raises
+        ``TypeError: unhashable type: 'dict'`` here, so this is the same
+        defect as above reaching the real call site.
+    """
+    # Arrange
+    records = [
+        {"uid": "a", "importance": 0.1},
+        {"uid": "b", "importance": 0.9},
+        {"uid": "c", "importance": 0.5},
+    ]
+
+    # Act
+    result = take_most_important(records, 2, lambda r: r["importance"])
+
+    # Assert
+    assert [r["uid"] for r in result] == ["b", "c"]
+
+
+def test_take_most_important_should_keep_the_last_of_equally_ranked_records():
+    """Test the tie-break, which the cap reaches on any unranked format.
+
+    Given:
+        Four records of identical importance and a cap of two.
+    When:
+        They are thinned.
+    Then:
+        It should keep the last two. This pins observed behavior rather than a
+        settled contract -- the sort is stable and the slice takes the tail,
+        so the later records win. If earlier ones should, this is the
+        assertion to invert.
+    """
+    # Act
+    result = take_most_important(["a", "b", "c", "d"], 2, lambda r: 1.0)
+
+    # Assert
+    assert result == ["c", "d"]
