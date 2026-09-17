@@ -23,6 +23,7 @@ Every fixture is synthesized into a temp directory, so the module runs on a
 checkout with no git-LFS payload.
 """
 
+import pysam
 import pytest
 
 from clodius.core.coords import Chromsizes
@@ -60,6 +61,20 @@ def make_bed(tmp_path):
 
     def build(records=RECORDS, name="records.bed"):
         return write_bed(tmp_path / name, records)
+
+    return build
+
+
+@pytest.fixture
+def make_bed_bgzf(tmp_path):
+    """Build a BGZF-compressed BED with a tabix index, so tiles read ranges."""
+
+    def build(records=RECORDS, name="records.bed"):
+        plain = write_bed(tmp_path / name, sorted(records))
+        gz = plain + ".gz"
+        pysam.tabix_compress(plain, gz, force=True)
+        pysam.tabix_index(gz, preset="bed", force=True)
+        return gz
 
     return build
 
@@ -115,6 +130,66 @@ def test_to_tile_record_should_return_none_when_the_contig_is_unknown():
 
     # Assert
     assert record is None
+
+
+def test_tiles_should_agree_between_the_indexed_and_scanning_paths(
+    make_bed, make_bed_bgzf
+):
+    """Test the two query paths against each other across the whole ladder.
+
+    Given:
+        The same records written as a plain BED and as a BGZF+tabix BED.
+    When:
+        Every tile in the ladder is requested from each.
+    Then:
+        The record sets should match tile for tile. Compressing a file must
+        not change what it serves, and it did: for a tile past the end of the
+        genome the indexed path handed oxbow an empty region list, which it
+        reads as *no filter*, and served the entire file.
+    """
+    # Arrange
+    scanning = BedTileset(make_bed(), CHROMSIZES)
+    indexed = BedTileset(make_bed_bgzf(), CHROMSIZES)
+    info = scanning.info()
+
+    # Act & assert
+    for z in range(info.max_zoom + 1):
+        for x in range(info.canvas(z).n_tiles):
+            tile_id = f"u.{z}.{x}"
+            (_, left), = scanning.tiles([scanning.parse_tile_id(tile_id)])
+            (_, right), = indexed.tiles([indexed.parse_tile_id(tile_id)])
+            assert sorted(names(left)) == sorted(names(right)), tile_id
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_tiles_should_be_empty_past_the_end_of_the_genome(
+    make_bed, make_bed_bgzf, indexed
+):
+    """Test the tile that lies entirely beyond the last chromosome.
+
+    Given:
+        A tileset whose quadtree extent exceeds its genome, which is every
+        tileset, and the last tile at max zoom.
+    When:
+        It is requested.
+    Then:
+        It should hold no records. This is not an exotic position: the extent
+        always overshoots, so a client walking the top zoom asks for it every
+        time.
+    """
+    # Arrange
+    build = make_bed_bgzf if indexed else make_bed
+    tileset = BedTileset(build(), CHROMSIZES)
+    info = tileset.info()
+    last = info.canvas(info.max_zoom).n_tiles - 1
+
+    # Act
+    (_, records), = tileset.tiles(
+        [tileset.parse_tile_id(f"u.{info.max_zoom}.{last}")]
+    )
+
+    # Assert
+    assert records == []
 
 
 def test_tiles_should_return_nothing_when_the_cap_is_zero(make_bed):
