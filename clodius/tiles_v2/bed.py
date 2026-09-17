@@ -259,14 +259,18 @@ class BedTileset(BaseTileset):
 
     def _tile(self, tid: TileId) -> list[AnnotationRecord]:
         ranges = list(self._info.canvas(tid.z).invert(tid.pos[0]))
+        in_bounds = [gr for gr in ranges if not gr.is_out_of_bounds]
+
+        # Applied before the indexed/unindexed split so the two paths cannot
+        # disagree. oxbow reads `regions=[]` as *no region filter* and scans
+        # the whole file, while `overlap_predicate` correctly matches nothing
+        # -- and a tile entirely past the end of the genome is routine, since
+        # `max_width` always exceeds the genome length.
+        if not in_bounds:
+            return []
+
         if self._is_indexed:
-            frame = self._scan(
-                [
-                    gr.to_ucsc(coords="01")
-                    for gr in ranges
-                    if not gr.is_out_of_bounds
-                ]
-            )
+            frame = self._scan([gr.to_ucsc(coords="01") for gr in in_bounds])
         else:
             frame = self._scan()
             predicate = overlap_predicate(ranges, self._chromsizes)
