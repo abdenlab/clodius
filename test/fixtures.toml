@@ -24,6 +24,13 @@ companions = ["GRCh38-cCREs.bed9.gz.tbi"]
 sha256 = "70a5aff67df2b4ed41f1f64c0d95472a6c459127a45dc21861966d067c82d421"
 size = 765362
 
+[files."ENCFF534PXC.bigInteract"]
+sha256 = "0176bf0834852f0bbe82041a2547dd121f7217555525989091281793f2f0d96a"
+size = 5227692
+description = """
+ENCODE K562 interactions, bed5+13. Served as 2D rectangles or as 1D links.
+"""
+
 [files."test.mcool"]
 sha256 = "a77252c0dffc38cdd31c0d8c05751f92f37c094dc462781e960df3fbd8594d14"
 size = 152457504
