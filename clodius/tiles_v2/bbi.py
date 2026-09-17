@@ -112,9 +112,10 @@ class BBITileset(BaseTileset):
         info = TilesetInfo.quadtree(
             chromsizes, self.tile_size, **self._info_extras()
         )
-        # Range padded out to the full quadtree extent, as legacy does.
-        info.max_pos = [info.max_width]
-        return info
+        # Range padded out to the full quadtree extent, as legacy does. Copied
+        # rather than assigned: TilesetInfo is frozen, and `max_width` is
+        # derived inside `quadtree`, so there is nothing to pass in up front.
+        return info.model_copy(update={"max_pos": [info.max_width]})
 
     def _info_extras(self) -> dict:
         """Type-specific info fields, if any."""

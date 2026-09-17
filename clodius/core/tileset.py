@@ -224,7 +224,19 @@ class DatasetInfo(BaseModel):
 
 
 class TilesetInfo(DatasetInfo):
-    """A :class:`DatasetInfo` that also carries a resolution ladder."""
+    """A :class:`DatasetInfo` that also carries a resolution ladder.
+
+    Frozen. The `coordinate_system` cached on it is only sound because the
+    field it reads cannot change underneath it.
+
+    Derive a variant with ``model_copy(update=...)``, bearing in mind that it
+    neither validates the update nor drops the cache: a misspelled key is
+    served verbatim, an out-of-range value is accepted where the constructor
+    would reject it, and a copy updating ``chromsizes`` keeps the coordinate
+    system derived from the old ones. Prefer constructing when either matters.
+    """
+
+    model_config = ConfigDict(extra="allow", frozen=True)
 
     # --- ladder, implicit form (power-of-two) ---
     max_zoom: int | None = None

@@ -8,11 +8,12 @@ its fields, which is only sound while the fields cannot move.
 """
 
 import pytest
+from pydantic import ValidationError
 
 from clodius.core.coords import Chromsizes
 from clodius.core.errors import MalformedTileId, UnsupportedOption
 from clodius.core.tileid import ModifierSpec
-from clodius.core.tileset import BaseTileset
+from clodius.core.tileset import BaseTileset, TilesetInfo
 
 CHROMSIZES = Chromsizes.from_pairs([("c1", 100), ("c2", 200)])
 
@@ -191,3 +192,85 @@ class TestBaseTileset:
             tileset.parse_tile_id("abc.3.4")
 
 
+class TestTilesetInfo:
+    """The served description of a tileset, and its immutability."""
+
+    def test___setattr___should_raise_when_a_field_is_assigned(self):
+        """Test that the model cannot be mutated after construction.
+
+        Given:
+            A tileset info built over a quadtree ladder.
+        When:
+            One of its fields is assigned.
+        Then:
+            It should raise. The canvas and zoom-count derivations are cached
+            off these fields, so a mutated info would keep serving the
+            derivations of the values it no longer holds.
+        """
+        # Arrange
+        info = TilesetInfo.quadtree(CHROMSIZES, 256)
+
+        # Act & assert
+        with pytest.raises(ValidationError):
+            info.tile_size = 999
+
+    def test___setattr___should_raise_when_an_undeclared_field_is_assigned(
+        self,
+    ):
+        """Test that ``extra="allow"`` does not leave a way in.
+
+        Given:
+            A tileset info, whose model config admits extra fields at
+            construction so a tileset can carry type-specific keys.
+        When:
+            A name the model does not declare is assigned.
+        Then:
+            It should raise, so the extras are a construction-time affordance
+            rather than a mutable side channel.
+        """
+        # Arrange
+        info = TilesetInfo.quadtree(CHROMSIZES, 256)
+
+        # Act & assert
+        with pytest.raises(ValidationError):
+            info.mirror_tiles = "false"
+
+    def test___init___should_accept_an_undeclared_field(self):
+        """Test the affordance the tilesets actually use.
+
+        Given:
+            A type-specific key supplied at construction, as the cooler
+            tileset supplies ``mirror_tiles``.
+        When:
+            The info is built.
+        Then:
+            It should carry the key, so freezing the model did not close the
+            door the tilesets come through.
+        """
+        # Act
+        info = TilesetInfo.quadtree(CHROMSIZES, 256, mirror_tiles="false")
+
+        # Assert
+        assert info.to_dict()["mirror_tiles"] == "false"
+
+    def test___setattr___should_raise_on_a_derived_copy(self):
+        """Test that deriving a variant does not launder mutability back in.
+
+        Given:
+            A copy taken with ``model_copy(update=...)``, the documented way to
+            derive a variant and the one the bigwig path uses.
+        When:
+            A field is assigned on the copy.
+        Then:
+            It should raise. Asserting only that the copy carries the new value
+            would pin pydantic rather than this model: ``model_copy`` behaves
+            identically on a mutable model, so such a test passes with
+            ``frozen=True`` removed.
+        """
+        # Arrange
+        info = TilesetInfo.quadtree(CHROMSIZES, 256)
+        padded = info.model_copy(update={"max_pos": [info.max_width]})
+
+        # Act & assert
+        with pytest.raises(ValidationError):
+            padded.tile_size = 999
