@@ -184,7 +184,14 @@ class CoolerTileset(BaseTileset):
         return self._info
 
     def tiles(self, ids, options=None) -> list[tuple[TileId, DenseTilePayload]]:
-        return [(tid, self._tile(tid)) for tid in ids]
+        """One entry per requested id; a refusal rides in the payload slot."""
+        out = []
+        for tid in ids:
+            try:
+                out.append((tid, self._tile(tid)))
+            except TileError as exc:
+                out.append((tid, exc.to_dict()))
+        return out
 
     # --- internals ----------------------------------------------------------
 

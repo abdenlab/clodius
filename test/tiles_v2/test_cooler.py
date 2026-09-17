@@ -17,6 +17,7 @@ committed multires cooler is a legacy implicit-ladder file with no
 
 import pytest
 
+from clodius.core.tileid import TileId
 from clodius.tiles_v2.cooler import CoolerTileset
 
 from ..core.mcool_fixture import build_mcool
@@ -83,3 +84,26 @@ def test_info_should_omit_the_flag_for_a_half_matrix(symmetric_mcool):
     assert "mirror_tiles" not in served
 
 
+def test_tiles_should_raise_when_the_file_cannot_be_opened():
+    """Test that a whole-request failure is not demoted to a per-tile one.
+
+    Given:
+        A tileset pointed at a path that does not exist.
+    When:
+        a tile is served.
+    Then:
+        It should raise rather than returning an error payload. The per-tile
+        catch exists for refusals that are genuinely about one tile; widening
+        it to every exception would answer a batch of sixteen with sixteen
+        cheerful error payloads and a 200, when the honest answer is that the
+        dataset cannot be served at all.
+    """
+    # Arrange
+    tileset = CoolerTileset("/nonexistent/none.mcool")
+    tid = TileId.parse("u.0.0.0", ndim=2)
+
+    # Act & assert
+    with pytest.raises(Exception) as excinfo:
+        tileset.tiles([tid])
+    assert not isinstance(excinfo.value, dict)
+    assert isinstance(excinfo.value, (OSError, ValueError))

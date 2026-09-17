@@ -192,6 +192,34 @@ def test_tiles_should_be_empty_past_the_end_of_the_genome(
     assert records == []
 
 
+def test_tiles_should_return_an_error_payload_for_a_tile_off_the_canvas(
+    make_bed,
+):
+    """Test that one bad position does not take the batch with it.
+
+    Given:
+        A batch of two tile ids, one inside the canvas and one past its last
+        tile.
+    When:
+        The batch is served.
+    Then:
+        It should return both entries, the second an error payload naming the
+        refusal. A tile-level refusal belongs in that tile's payload slot;
+        raising through ``tiles()`` discards the fifteen tiles that were fine.
+    """
+    # Arrange
+    tileset = BedTileset(make_bed(), CHROMSIZES)
+    n_tiles = tileset.info().canvas(1).n_tiles
+    ids = [tileset.parse_tile_id("u.1.0"), tileset.parse_tile_id(f"u.1.{n_tiles}")]
+
+    # Act
+    results = tileset.tiles(ids)
+
+    # Assert
+    assert len(results) == 2
+    assert results[1][1]["error_type"] == "TileOutOfBounds"
+
+
 def test_tiles_should_return_nothing_when_the_cap_is_zero(make_bed):
     """Test the record cap on the path that never calls the shared helper.
 
