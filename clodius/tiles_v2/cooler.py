@@ -169,7 +169,7 @@ def _runs(positions, strip):
 class BlockReader:
     """Reads one 2D block of a cooler per (row, col) interval pair.
 
-    A tile position maps to one genomic interval per axis, or to several where
+    A tile position maps to one genomic interval per axis, or to several when
     it straddles a chromosome boundary, and each pairing of the two axes'
     intervals is read separately through the public ``Cooler.matrix()`` API.
     """
@@ -381,6 +381,7 @@ class CoolerTileset(BaseTileset):
     def __init__(
         self,
         path,
+        chromsizes: Chromsizes | None = None,
         policy: TilePolicy | None = None,
         tile_size: int = TILE_SIZE,
         batched: bool = True,
@@ -388,6 +389,14 @@ class CoolerTileset(BaseTileset):
         self._path = path
         self._file = None
         self._info = None
+        if chromsizes is not None:
+            self._chromsizes = chromsizes
+        else:
+            clr = self._cooler(self.resolutions[0])
+            self._chromsizes = Chromsizes(
+                tuple(clr.chromnames),
+                tuple(int(v) for v in clr.chromsizes.values),
+            )
         self.policy = policy or TilePolicy()
         self.tile_size = tile_size
         self.reader = BatchedBlockReader if batched else BlockReader
@@ -413,10 +422,7 @@ class CoolerTileset(BaseTileset):
     # --- ProvidesChromsizes -------------------------------------------------
 
     def chromsizes(self) -> Chromsizes:
-        clr = self._cooler(self.resolutions[0])
-        return Chromsizes(
-            tuple(clr.chromnames), tuple(int(v) for v in clr.chromsizes.values)
-        )
+        return self._chromsizes
 
     @property
     def resolutions(self) -> tuple[int, ...]:
