@@ -1,8 +1,11 @@
 """Batched reads in the v2 cooler tileset."""
 
+import base64
+
+import numpy as np
 import pytest
 
-from clodius.core.coords import Chromsizes
+from clodius.core.coords import Chromsizes, GenomicRange
 from clodius.tiles_v2 import cooler as ctiles
 from test.core.mcool_fixture import build_mcool
 
@@ -76,6 +79,58 @@ def test_balanced_tiles_agree_between_readers(mcool):
     assert payloads(ts, ids) == payloads(
         ctiles.CoolerTileset(mcool, batched=False), ids
     )
+
+
+ABSENT = "chrZ"
+
+
+def extended(ts, length=1_000_000):
+    """The cooler's chromsizes with a contig the file does not hold."""
+    cs = ts.chromsizes()
+    return Chromsizes(cs.names + (ABSENT,), cs.lengths + (length,))
+
+
+def tiles_within_absent_contig(ts, z):
+    """Tile positions whose whole span falls inside the absent contig."""
+    chromsizes = ts.chromsizes()
+    canvas = ts.info().canvas(z)
+    lo = chromsizes.offsets[ABSENT]
+    hi = lo + dict(chromsizes.to_pairs())[ABSENT]
+    return [
+        x
+        for x in canvas.transform(
+            GenomicRange(len(chromsizes) - 1, ABSENT, 0, hi - lo)
+        )
+        if lo <= canvas.tile_span(x)[0] and canvas.tile_span(x)[1] <= hi
+    ]
+
+
+@pytest.mark.parametrize("batched", [True, False])
+def test_absent_contig_yields_nan_rather_than_failing(mcool, batched):
+    """A custom chromsizes may declare contigs the cooler has no bins for."""
+    chromsizes = extended(ctiles.CoolerTileset(mcool))
+    ts = ctiles.CoolerTileset(mcool, chromsizes=chromsizes, batched=batched)
+    positions = tiles_within_absent_contig(ts, 3)
+    assert positions
+
+    ids = [
+        ts.parse_tile_id(f"uid.3.{x}.{y}") for y in positions for x in positions
+    ]
+    for payload in [p for _, p in ts.tiles(ids)]:
+        values = np.frombuffer(
+            base64.b64decode(payload["dense"]), dtype=payload["dtype"]
+        )
+        assert len(values) == ts.tile_size**2
+        assert np.isnan(values).all()
+
+
+def test_absent_contig_does_not_disturb_its_neighbours(mcool):
+    """Tiles either side of the absent contig still carry their own data."""
+    plain = ctiles.CoolerTileset(mcool)
+    ids = grid(plain, 2)
+    extra = ctiles.CoolerTileset(mcool, chromsizes=extended(plain))
+    for tid, expected in zip(ids, payloads(plain, ids)):
+        assert payloads(extra, [tid]) == [expected]
 
 
 def test_full_grid_is_one_read(mcool, recorder):

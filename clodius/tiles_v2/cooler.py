@@ -84,9 +84,10 @@ def fetch_block(
 ):
     """One rectangle of the matrix, through the public cooler API."""
     shape = (_bin_count(row, binsize), _bin_count(col, binsize))
-    if row.is_out_of_bounds or col.is_out_of_bounds:
-        # Past the last chromosome: padding, not missing data. Same contract as
-        # the 1D path -- the caller supplies a correctly shaped NaN block.
+    if _is_absent(row, clr.chromnames) or _is_absent(col, clr.chromnames):
+        # Padding past the last chromosome, or a chromosome the served
+        # chromsizes declare but the file does not hold. Neither is missing
+        # data: the tile is simply empty there.
         return np.full(shape, np.nan, dtype=np.float32)
     if 0 in shape:
         return np.empty(shape, dtype=np.float32)
@@ -95,6 +96,11 @@ def fetch_block(
         _query(row, binsize), _query(col, binsize)
     )
     return block.astype(np.float32)
+
+
+def _is_absent(interval: GenomicRange, names) -> bool:
+    """Whether the cooler holds no bins for this interval at all."""
+    return interval.is_out_of_bounds or interval.name not in names
 
 
 def _query(interval: GenomicRange, binsize: float) -> tuple[str, int, int]:
@@ -123,9 +129,10 @@ def _window(
 ) -> tuple[int, int] | None:
     """Bin ids ``[lo, hi)`` that a fetch of this interval returns.
 
-    None past the last chromosome, where there is nothing to read.
+    None where the cooler has no bins to read: past the last chromosome, or on
+    a chromosome the served chromsizes declare but the file does not hold.
     """
-    if interval.is_out_of_bounds:
+    if _is_absent(interval, offsets):
         return None
     lo = offsets[interval.name] + _first_bin(interval, binsize)
     return (lo, lo + _bin_count(interval, binsize))
@@ -136,8 +143,9 @@ def _merge(windows) -> tuple[int, int] | None:
 
     Windows must arrive in ascending order. Consecutive tiles may overlap by a
     bin, since each snaps its own start edge to the nearest bin boundary. Empty
-    windows (past the last chromosome) are skipped: they read nothing, and only
-    ever trail the rest.
+    windows are skipped rather than treated as a gap: they read nothing, and
+    each block is sliced by its own window, so covering the span an absent
+    chromosome sits in is harmless.
     """
     lo = hi = None
     for w in windows:
@@ -275,8 +283,7 @@ class BatchedBlockReader(BlockReader):
         rw = _window(row, self.binsize, self._offsets)
         cw = _window(col, self.binsize, self._offsets)
         if rw is None or cw is None:
-            # Past the last chromosome: padding, not missing data. Same contract
-            # as the 1D path -- the caller supplies a NaN block of the right shape.
+            # Nothing stored for this interval pair; see :func:`_window`.
             shape = (
                 _bin_count(row, self.binsize),
                 _bin_count(col, self.binsize),
