@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from clodius.core.errors import (
     MalformedTileId,
+    TilesetUnavailable,
     UnsupportedModifier,
     UnsupportedOption,
 )
@@ -146,12 +147,21 @@ class TileId:
         slots from modifiers: with the arity fixed, a trailing non-numeric part
         is unambiguously the modifier.
         """
-        # Checked before the id itself. A tileset that mis-declares its arity
-        # would otherwise reach the coordinate slice below and raise a bare
-        # `ValueError`, which is not a `TilesetError` and so escapes the
-        # server boundary as a 500 rather than a renderable per-tile error.
+        # Checked before the id itself, and reported against the tileset
+        # rather than the request. The arity is the tileset's own declaration,
+        # so a client told its well-formed id was malformed retries forever
+        # against a fault only the server can fix -- the same reasoning
+        # `BaseTileset.parse_tile_id` applies to a missing `ndim`. Fatal to the
+        # tileset, not renderable per tile: `TilesetUnavailable` is a sibling
+        # of `TileError`, not a subclass.
+        #
+        # Without the check nothing raises loudly. `ndim=0` parses a
+        # coordinate-less id without complaint, or reads the position as a
+        # modifier; `ndim<0` slices its way to an `IndexError`. Neither is a
+        # `TilesetError`, so neither reaches the boundary as anything a client
+        # can read.
         if ndim < 1:
-            raise MalformedTileId(
+            raise TilesetUnavailable(
                 f"invalid arity {ndim} declared for {tile_id!r}; a tile id "
                 f"needs at least one coordinate"
             )

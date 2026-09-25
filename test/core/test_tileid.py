@@ -11,7 +11,11 @@ rejection.
 
 import pytest
 
-from clodius.core.errors import MalformedTileId, TilesetError
+from clodius.core.errors import (
+    MalformedTileId,
+    TilesetError,
+    TilesetUnavailable,
+)
 from clodius.core.tileid import ModifierSpec, TileId
 
 
@@ -75,14 +79,36 @@ def test_parse_should_raise_when_the_declared_arity_is_invalid(ndim):
     When:
         A tile id is parsed against it.
     Then:
-        It should raise ``MalformedTileId``. The defect being pinned is the
-        exception's class, not the rejection: a bare ``ValueError`` here is
-        not a ``TilesetError``, so it escapes the server boundary as a 500
-        instead of a per-tile error.
+        It should raise ``TilesetUnavailable`` rather than ``MalformedTileId``.
+        The defect being pinned is the exception's class, not the rejection.
+        The arity is the tileset's own declaration and not part of the
+        request, so a client told its well-formed id was malformed retries
+        forever against a fault only the server can fix.
     """
     # Act & assert
-    with pytest.raises(MalformedTileId, match="arity"):
+    with pytest.raises(TilesetUnavailable, match="arity"):
         TileId.parse("abc.3.4", ndim=ndim)
+
+
+@pytest.mark.parametrize("ndim", [0, -1])
+def test_parse_should_not_raise_a_client_error_when_the_arity_is_invalid(ndim):
+    """Test that a server-side misdeclaration is not blamed on the client.
+
+    Given:
+        A declared arity below one.
+    When:
+        A tile id is parsed against it.
+    Then:
+        It should not raise ``MalformedTileId``, whose contract is that the
+        request itself is bad. Asserted separately from the class above
+        because the two errors share a base: a test for the positive class
+        alone would keep passing if the negative one were reintroduced
+        alongside it.
+    """
+    # Act & assert
+    with pytest.raises(TilesetError) as excinfo:
+        TileId.parse("abc.3.4", ndim=ndim)
+    assert not isinstance(excinfo.value, MalformedTileId)
 
 
 @pytest.mark.parametrize(
