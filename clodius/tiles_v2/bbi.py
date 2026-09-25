@@ -81,7 +81,7 @@ class BBITileset(BaseTileset):
         # Alternate pre-defined chromsizes orderings. The client can select
         # these per tile via `,cos:<uid>`.
         self._chromsizes_alts = chromsizes_alts or {}
-        self._info = self._info_for(self._chromsizes)
+        self._info = self._build_info(self._chromsizes)
 
     # --- resource lifetime --------------------------------------------------
 
@@ -134,20 +134,31 @@ class BBITileset(BaseTileset):
     # --- internals ----------------------------------------------------------
 
     def _info_for(self, chromsizes: Chromsizes) -> TilesetInfo:
-        """Tileset info under a given set of chromsizes."""
+        """Tileset info under a given set of chromsizes.
+
+        The tileset's own chromsizes are the case by far the most tiles take,
+        and the info for those was built once at construction. Rebuilding it
+        runs a full quadtree validation and hands back an instance with a cold
+        `coordinate_system` cache, so `canvas()` then rebuilds a whole
+        `Chromsizes` -- half a millisecond per tile on a heavily scaffolded
+        assembly, against under a microsecond for the cached info.
+        """
+        if chromsizes is self._chromsizes:
+            return self._info
+        return self._build_info(chromsizes)
+
+    def _build_info(self, chromsizes: Chromsizes) -> TilesetInfo:
         info = TilesetInfo.quadtree(
             chromsizes, self.tile_size, ndim=self.ndim, **self._info_extras()
         )
         # Range padded out to the full quadtree extent, as legacy does. One
         # entry per axis: a 2D track reads the y extent from ``max_pos[1]``.
         #
-        # Copied rather than assigned, so this keeps working against a frozen
-        # TilesetInfo: the assignment raises there, and it raises from
-        # `info()` -- which `tiles()` calls first -- so it would take every
-        # BBI tileset down, not only the 2D one.
-        return info.model_copy(
-            update={"max_pos": [info.max_width] * self.ndim}
-        )
+        # Derived rather than assigned: TilesetInfo is frozen, and `max_width`
+        # is computed inside `quadtree`, so there is nothing to pass in up
+        # front. `with_` re-validates and drops the cache; `model_copy` does
+        # neither.
+        return info.with_(max_pos=[info.max_width] * self.ndim)
 
     def _info_extras(self) -> dict:
         """Type-specific info fields, if any."""
@@ -213,11 +224,7 @@ class BBISignalTileset(BBITileset):
 
     def _tile(self, tid: TileId) -> DenseTilePayload:
         chromsizes = self._chromsizes_for(tid)
-        info = (
-            self._info
-            if chromsizes is self._chromsizes
-            else self._info_for(chromsizes)
-        )
+        info = self._info_for(chromsizes)
 
         # A range mode returns several values per bin instead of one, which is
         # what `size` on the payload announces.
