@@ -258,10 +258,10 @@ class Ladder(str, Enum):
 class DatasetInfo(BaseModel):
     """Fields common to anything servable, tiled or not.
 
-    Frozen, like :class:`TilesetInfo`. Both are public and `Dataset.info()`
+    Frozen, like `TilesetInfo`. Both are public and `Dataset.info()`
     is annotated with this one, so code written against the base's contract
     would otherwise type-check and then fail only on the subclass. Derive a
-    variant with :meth:`with_`.
+    variant with `with_`.
     """
 
     model_config = ConfigDict(extra="allow", frozen=True)
@@ -307,7 +307,7 @@ class DatasetInfo(BaseModel):
 
 
 class TilesetInfo(DatasetInfo):
-    """A :class:`DatasetInfo` that also carries a resolution ladder.
+    """A `DatasetInfo` that also carries a resolution ladder.
 
     Frozen, which is what makes the cached `coordinate_system` sound: the
     field it reads cannot be rebound underneath it. Only rebound -- pydantic's

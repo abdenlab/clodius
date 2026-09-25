@@ -383,7 +383,7 @@ class TileCanvas:
     def invert(self, x: int) -> Iterator[GenomicRange]:
         """Genomic intervals covered by tile ``x``.
 
-        Validation is eager, unlike its sibling :meth:`transform`: this is an
+        Validation is eager, unlike its sibling `transform`: this is an
         ordinary function returning a generator, not a generator function, so
         the exceptions below are raised at the call rather than on the first
         iteration. Callers rely on that to screen a position without consuming

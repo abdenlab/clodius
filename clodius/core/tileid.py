@@ -31,14 +31,14 @@ def _is_int(text: str) -> bool:
     """Whether a dotted part is a coordinate rather than a modifier.
 
     A leading ``-`` counts, so that a negative coordinate is read as the
-    coordinate it is and rejected by :meth:`TileId.parse` with a message
+    coordinate it is and rejected by `TileId.parse` with a message
     naming the problem, rather than falling through to the modifier slot.
 
     ASCII decimal digits only, which is narrower than both of the obvious
     spellings. ``int`` would accept ``+5`` and ``1_0``; ``str.isdigit`` is the
     opposite error, admitting superscripts that ``int`` then rejects with a
     bare ``ValueError`` -- not a
-    :class:`~clodius.core.errors.TilesetError`, so it escapes the server
+    `clodius.core.errors.TilesetError`, so it escapes the server
     boundary as a 500; and ``str.isdecimal`` alone still admits fullwidth
     digits, where ``int`` succeeds and ``abc.3.１`` silently denotes tile 1.
 

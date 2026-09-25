@@ -94,7 +94,7 @@ def to_paired(
     unplaced contig, a naming mismatch, or a different assembly build. The
     record has no position on the genome-spanning axis, so it is skipped
     rather than raising: a bare ``KeyError`` is not a
-    :class:`~clodius.core.errors.TileError` and would escape the server
+    `clodius.core.errors.TileError` and would escape the server
     boundary as a 500. Handled here rather than at the call sites so a third
     caller cannot reintroduce it.
     """

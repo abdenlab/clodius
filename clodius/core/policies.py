@@ -297,7 +297,7 @@ def take_most_important(
 ) -> list[T]:
     """The ``cap`` most important records, in their original order.
 
-    ``cap`` of ``None`` means no limit, matching :class:`TilePolicy`. A ``cap``
+    ``cap`` of ``None`` means no limit, matching `TilePolicy`. A ``cap``
     of zero or less returns nothing: ``ranked[-0:]`` is the whole list, so
     without this guard a server configured to serve no records would emit an
     unbounded tile -- the precise failure the cap exists to prevent.
