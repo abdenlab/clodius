@@ -10,7 +10,10 @@ from clodius.core.coords import TileCanvas, Chromsizes
 from clodius.core.tile import AnnotationRecord, TileKind
 from clodius.core.policies import TilePolicy
 from clodius.core.tileid import ModifierSpec, TileId
-from clodius.core.errors import TileOutOfBounds
+from clodius.core.errors import (
+    TileOutOfBounds,
+    TilesetUnavailable,
+)
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -127,20 +130,34 @@ class BaseTileset:
 
     modifiers: ClassVar[ModifierSpec | None] = None
     options: ClassVar[frozenset[str]] = frozenset()
-    # Overridden by every real tileset. Declared here so that a subclass which
-    # forgets it raises MalformedTileId from `TileId.parse` rather than
-    # AttributeError -- which is not a TilesetError, and so escapes the server
-    # boundary as a 500.
-    ndim: ClassVar[int] = 0
+    # Annotated, deliberately not assigned. `Tileset` is a runtime-checkable
+    # Protocol, so `isinstance` is an attribute-presence test and `ndim` is one
+    # of the attributes it tests -- a concrete default here would make a
+    # subclass that forgot to declare one pass the only published "is this
+    # servable" check. The absence is caught in `parse_tile_id` instead, where
+    # it can be reported as the server-side misdeclaration it is.
+    ndim: ClassVar[int]
 
     tile_size: int
     policy: TilePolicy
 
     def parse_tile_id(self, tile_id: str) -> TileId:
         """Parse against this tileset's declared shape."""
+        # `getattr` with a default is load-bearing: `ndim: ClassVar[int]`
+        # creates an annotation and no attribute, so `self.ndim` would raise
+        # AttributeError. The arity is the tileset's own declaration and not
+        # part of the request, so a missing one is `TilesetUnavailable` -- a
+        # client told its well-formed id was malformed retries forever against
+        # a fault only the server can fix.
+        ndim = getattr(self, "ndim", None)
+        if ndim is None:
+            raise TilesetUnavailable(
+                f"{type(self).__name__} declares no ndim, so a tile id "
+                f"cannot be parsed against it"
+            )
         return TileId.parse(
             tile_id,
-            ndim=self.ndim,
+            ndim=ndim,
             modifiers=self.modifiers,
             # Passed through unchanged. `self.options or None` would collapse
             # an empty frozenset to `None` -- "accept any option" -- which is
