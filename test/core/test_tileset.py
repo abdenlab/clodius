@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from clodius.core.coords import Chromsizes
 from clodius.core.errors import (
     TileOutOfBounds,
+    TilesetError,
     TilesetUnavailable,
     UnsupportedOption,
 )
@@ -336,6 +337,54 @@ class TestBaseTilesetTiles:
         # Assert
         assert [tid.pos[0] for tid, _ in served] == [0, 1, 2]
         assert [payload for _, payload in served] == [[0], [1], [2]]
+
+    @pytest.mark.parametrize("options", [None, {}])
+    def test_tiles_should_serve_the_batch_when_no_option_is_passed(
+        self, options
+    ):
+        """Test the two spellings of "no options", which must both serve.
+
+        Given:
+            A tileset inheriting the default ``tiles``, and a batch passing
+            either no options or an empty mapping.
+        When:
+            The batch is served.
+        Then:
+            It should serve every tile. An empty mapping is not a request for
+            anything, so refusing it would break every caller that passes the
+            parameter through unconditionally.
+        """
+        # Arrange
+        tileset = ServingTileset()
+        ids = [tileset.parse_tile_id("abc.0.0")]
+
+        # Act
+        served = tileset.tiles(ids, options)
+
+        # Assert
+        assert [payload for _, payload in served] == [[0]]
+
+    def test_tiles_should_raise_when_an_option_is_passed_it_cannot_read(self):
+        """Test the promise the base makes on behalf of everything under it.
+
+        Given:
+            A tileset inheriting the default ``tiles``, which understands no
+            options, and a batch carrying one.
+        When:
+            The batch is served.
+        Then:
+            It should raise a ``TilesetError`` rather than serve. Options
+            arrive once for the whole batch, so a bad one is a whole-batch
+            failure -- and the default silently discarded them, serving tiles
+            that ignored what was asked for.
+        """
+        # Arrange
+        tileset = ServingTileset()
+        ids = [tileset.parse_tile_id("abc.0.0")]
+
+        # Act & assert
+        with pytest.raises(TilesetError):
+            tileset.tiles(ids, {"aggregation": "mean"})
 
     def test_tiles_should_return_a_refusal_as_that_tiles_payload(self):
         """Test that one refusal does not take the batch down with it.

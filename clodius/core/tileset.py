@@ -143,7 +143,9 @@ class BaseTileset:
     policy: TilePolicy
 
     def tiles(
-        self, ids: Sequence[TileId], options=None
+        self,
+        ids: Sequence[TileId],
+        options: Mapping[str, Any] | None = None,
     ) -> list[tuple[TileId, TileKind]]:
         """One entry per requested id, always.
 
@@ -155,7 +157,16 @@ class BaseTileset:
 
         A tileset whose `_tile` needs more than a tile id -- a batch-wide
         option, a shared reader -- overrides this; every other one inherits it.
+        A tileset inheriting this default understands no options at all, so a
+        non-empty ``options`` is refused rather than dropped: the protocol says
+        malformed options are a whole-batch failure, and silently serving
+        tiles that ignore what was asked for is the worse of the two answers.
         """
+        if options:
+            raise TilesetUnavailable(
+                f"{type(self).__name__} accepts no tile options; got "
+                f"{sorted(options)}"
+            )
         out = []
         for tid in ids:
             try:
