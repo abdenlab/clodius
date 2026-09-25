@@ -128,10 +128,11 @@ class BBITileset(BaseTileset):
     def _info_for(self, chromsizes: Chromsizes) -> TilesetInfo:
         """Tileset info under a given set of chromsizes."""
         info = TilesetInfo.quadtree(
-            chromsizes, self.tile_size, **self._info_extras()
+            chromsizes, self.tile_size, ndim=self.ndim, **self._info_extras()
         )
-        # Range padded out to the full quadtree extent, as legacy does.
-        info.max_pos = [info.max_width]
+        # Range padded out to the full quadtree extent, as legacy does. One
+        # entry per axis: a 2D track reads the y extent from ``max_pos[1]``.
+        info.max_pos = [info.max_width] * self.ndim
         return info
 
     def _info_extras(self) -> dict:
