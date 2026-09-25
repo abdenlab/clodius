@@ -18,6 +18,7 @@ from clodius.core.policies import (
 )
 from clodius.core.tileid import TileId
 from clodius.core.tileset import BaseTileset, TilesetInfo
+from clodius.tiles_v2._exprs import known_chroms
 
 TILE_SIZE = 1024
 HASH_SEED = 0x1F4B_5C0D
@@ -220,9 +221,7 @@ class VariantTileset(BaseTileset):
                 tuple(n for n, _ in pairs), tuple(int(v) for _, v in pairs)
             )
         self._chromsizes = chromsizes
-        # Built once: the chromsizes are fixed for the tileset's life, and the
-        # polars Series behind `is_in` is not free to rebuild per call.
-        self._known_chroms = pl.col("chrom").is_in(list(chromsizes.offsets))
+        self._known_chroms = known_chroms(chromsizes, "chrom")
         self._info = self._build_info()
 
     def chromsizes(self) -> Chromsizes:

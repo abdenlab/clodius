@@ -12,6 +12,7 @@ from clodius.core.tile import Annotation2DRecord
 from clodius.core.policies import TilePolicy, LinkPolicy
 from clodius.core.tileid import TileId
 from clodius.core.tileset import BaseTileset, TilesetInfo
+from clodius.tiles_v2._exprs import known_chroms
 
 TILE_SIZE = 1024
 
@@ -159,11 +160,7 @@ class _BedpeBase(BaseTileset):
             self._path
         )
         self._chromsizes = chromsizes
-        # Built once: the chromsizes are fixed for the tileset's life, and the
-        # polars Series behind `is_in` is not free to rebuild per tile.
-        self._known_chroms = pl.col("chrom").is_in(
-            list(chromsizes.offsets)
-        ) & pl.col("chrom2").is_in(list(chromsizes.offsets))
+        self._known_chroms = known_chroms(chromsizes, "chrom", "chrom2")
         self.policy = policy or TilePolicy()
         self.tile_size = tile_size
         self._info = self._build_info()
