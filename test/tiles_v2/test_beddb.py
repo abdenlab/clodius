@@ -90,6 +90,88 @@ def write_3t_beddb(path):
     return str(path)
 
 
+#: Four records at known zoom levels, spread so a tile can pick one out.
+RANGE_RECORDS = [
+    (0, 0, 10, 20, "a"),
+    (1, 1, 1030, 1040, "b"),
+    (2, 2, 2060, 2070, "c"),
+    (3, 2, 3080, 3090, "d"),
+]
+
+
+def write_range_beddb(path, version):
+    """Write a beddb at schema version 1, 2 or 3 over the same records.
+
+    ``version`` of ``None`` writes v1, which has no ``version`` column at all;
+    v2 and v3 move the zoom range into the R-tree, and v3 adds ``name`` and
+    stores its version as text.
+    """
+    conn = sqlite3.connect(str(path))
+    columns = (
+        "zoom_step INT, max_length INT, assembly TEXT, chrom_names TEXT,"
+        " chrom_sizes TEXT, tile_size REAL, max_zoom INT, max_width REAL,"
+        " header TEXT"
+    )
+    values = [1, 4000, "test", "c1", "4000", TILE_SIZE, MAX_ZOOM, MAX_WIDTH, ""]
+    if version is not None:
+        columns += ", version TEXT"
+        values.append(version)
+    conn.execute(f"CREATE TABLE tileset_info ({columns})")
+    conn.execute(
+        f"INSERT INTO tileset_info VALUES ({','.join('?' * len(values))})",
+        values,
+    )
+
+    name_col = ", name TEXT" if version == "3" else ""
+    conn.execute(
+        "CREATE TABLE intervals ("
+        " id INT PRIMARY KEY, zoomLevel INT, importance REAL, startPos INT,"
+        f" endPos INT, chrOffset INT, uid TEXT, fields TEXT{name_col})"
+    )
+    if version is None:
+        conn.execute(
+            "CREATE VIRTUAL TABLE position_index USING"
+            " rtree(id, rStartPos, rEndPos)"
+        )
+    else:
+        conn.execute(
+            "CREATE VIRTUAL TABLE position_index USING"
+            " rtree(id, rStartPos, rEndPos, rStartZoomLevel, rEndZoomLevel)"
+        )
+
+    for rid, zoom, start, end, label in RANGE_RECORDS:
+        extra = (label,) if version == "3" else ()
+        placeholders = "?,?,?,?,?,?,?,?" + (",?" if extra else "")
+        conn.execute(
+            f"INSERT INTO intervals VALUES ({placeholders})",
+            (rid, zoom, 1.0, start, end, 0, f"u{rid}",
+             f"c1\t{start}\t{end}\t{label}") + extra,
+        )
+        if version is None:
+            conn.execute(
+                "INSERT INTO position_index VALUES (?,?,?)", (rid, start, end)
+            )
+        else:
+            conn.execute(
+                "INSERT INTO position_index VALUES (?,?,?,?,?)",
+                (rid, start, end, zoom, MAX_ZOOM),
+            )
+    conn.commit()
+    conn.close()
+    return str(path)
+
+
+@pytest.fixture(scope="module")
+def range_beddbs(tmp_path_factory):
+    """One beddb per range-querying schema version, over identical records."""
+    root = tmp_path_factory.mktemp("beddb_versions")
+    return {
+        1: write_range_beddb(root / "v1.beddb", None),
+        2: write_range_beddb(root / "v2.beddb", 2),
+        3: write_range_beddb(root / "v3.beddb", "3"),
+    }
+
+
 @pytest.fixture(scope="module")
 def beddb_3t(tmp_path_factory):
     """A precomputed-tile beddb, the one version with no range query."""
@@ -103,6 +185,85 @@ def labels(payload):
 
 class TestBedDbTileset:
     """The bounds check the precomputed-tile branch used to skip."""
+
+    @pytest.mark.parametrize("version", [1, 2, 3])
+    @pytest.mark.parametrize("tile_id,expected", [
+        ("u.0.0", ["a"]),
+        ("u.2.0", ["a"]),
+        ("u.2.2", ["c"]),
+    ])
+    def test_tiles_should_agree_across_the_range_querying_versions(
+        self, range_beddbs, version, tile_id, expected
+    ):
+        """Test that three schemas answer one tile the same way.
+
+        Given:
+            The same records written at schema versions 1, 2 and 3.
+        When:
+            The same tile is served from each.
+        Then:
+            All three should return the same records. Version 1 filters zoom
+            with a column predicate while 2 and 3 move it into the R-tree, so
+            these are three different queries reaching one answer -- and only
+            the fourth variant had any coverage.
+        """
+        # Arrange
+        tileset = BedDbTileset(range_beddbs[version])
+
+        # Act
+        (_, payload), = tileset.tiles([tileset.parse_tile_id(tile_id)])
+
+        # Assert
+        assert sorted(r["fields"][3] for r in payload) == expected
+
+    def test_version_should_normalize_a_version_stored_as_text(
+        self, range_beddbs
+    ):
+        """Test the v3 header, which stores its version as a string.
+
+        Given:
+            A beddb whose ``version`` column holds the text ``"3"``, as real
+            v3 files do.
+        When:
+            The version is read and a tile served.
+        Then:
+            It should report the integer 3 and emit ``name`` on every record.
+            Left as text, the version compares equal to nothing the selector
+            branches on and the file is read as v1 -- silently dropping the
+            column v3 exists to add.
+        """
+        # Arrange
+        tileset = BedDbTileset(range_beddbs[3])
+
+        # Act
+        (_, payload), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+        # Assert
+        assert tileset.version == 3
+        assert all("name" in record for record in payload)
+
+    @pytest.mark.parametrize("version", [1, 2])
+    def test_tiles_should_omit_the_name_before_version_three(
+        self, range_beddbs, version
+    ):
+        """Test the control for the name column above.
+
+        Given:
+            A beddb at a schema version with no ``name`` column.
+        When:
+            A tile is served.
+        Then:
+            No record should carry a ``name`` key. Selecting one regardless
+            would raise on a file that does not have it.
+        """
+        # Arrange
+        tileset = BedDbTileset(range_beddbs[version])
+
+        # Act
+        (_, payload), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+        # Assert
+        assert all("name" not in record for record in payload)
 
     def test_version_should_report_the_precomputed_schema(self, beddb_3t):
         """Test that the fixture exercises the branch under test.
