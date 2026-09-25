@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import os
-from typing import Iterator, Sequence
+from typing import Iterator
 
 import apsw
 import sosqlite
 
 from clodius.core.coords import Chromsizes
-from clodius.core.errors import TileError
 from clodius.core.tile import Annotation2DRecord
 from clodius.core.policies import TilePolicy, LinkPolicy
 from clodius.core.tileid import TileId
@@ -104,16 +103,6 @@ class _Bed2ddbBase(BaseTileset):
 
     def info(self) -> TilesetInfo:
         return self._info
-
-    def tiles(self, ids: Sequence[TileId], options=None):
-        """One entry per requested id; a refusal rides in the payload slot."""
-        out = []
-        for tid in ids:
-            try:
-                out.append((tid, self._tile(tid)))
-            except TileError as exc:
-                out.append((tid, exc.to_dict()))
-        return out
 
     # --- what the subclasses supply -----------------------------------------
 

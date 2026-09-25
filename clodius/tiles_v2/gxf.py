@@ -38,7 +38,7 @@ import oxbow as ox
 import polars as pl
 
 from clodius.core.coords import Chromsizes, GenomicRange
-from clodius.core.errors import TileError, TilesetUnavailable
+from clodius.core.errors import TilesetUnavailable
 from clodius.core.tile import AnnotationRecord
 from clodius.core.policies import (
     TilePolicy,
@@ -491,18 +491,6 @@ class GxfTileset(BaseTileset):
 
     def info(self) -> TilesetInfo:
         return self._info
-
-    def tiles(
-        self, ids: Sequence[TileId], options=None
-    ) -> list[tuple[TileId, list[AnnotationRecord]]]:
-        """One entry per requested id; a refusal rides in the payload slot."""
-        out = []
-        for tid in ids:
-            try:
-                out.append((tid, self._tile(tid)))
-            except TileError as exc:
-                out.append((tid, exc.to_dict()))
-        return out
 
     def close(self) -> None:
         pass

@@ -9,7 +9,6 @@ import polars as pl
 
 from clodius.core.coords import Chromsizes, GenomicRange
 from clodius.core.errors import (
-    TileError,
     TilesetUnavailable,
     TileTooWide,
 )
@@ -231,24 +230,6 @@ class VariantTileset(BaseTileset):
 
     def info(self) -> TilesetInfo:
         return self._info
-
-    def tiles(
-        self, ids: Sequence[TileId], options=None
-    ) -> list[tuple[TileId, list[AnnotationRecord]]]:
-        """One entry per requested id, always.
-
-        A per-tile refusal lands in that tile's payload slot rather than
-        aborting the batch. Only errors that are genuinely per-tile are caught
-        here -- an unreadable file still raises, because retrying the other
-        fifteen tiles against it is pointless.
-        """
-        out = []
-        for tid in ids:
-            try:
-                out.append((tid, self._tile(tid)))
-            except TileError as exc:
-                out.append((tid, exc.to_dict()))
-        return out
 
     def close(self) -> None:
         pass
