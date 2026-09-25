@@ -248,6 +248,17 @@ class BedDbTileset(BaseTileset):
     def _tile(self, tid: TileId) -> list[AnnotationRecord]:
         selector = self._selector
 
+        # Hoisted above the branch, so both arms share the bound. The `"3t"`
+        # arm reaches no bounded accessor of its own, and its tile id
+        # `2**z - 1 + x` is not injective over an unvalidated `(z, x)`: an
+        # off-lattice position lands on a different node of the tree and
+        # serves that node's records as if they were this tile's -- worse than
+        # the empty tile an unchecked range would give, because it looks
+        # right. Checking here also keeps `2**z` away from a request-controlled
+        # exponent, which raises a bare `ValueError` past Python's
+        # integer-conversion limit and so takes the whole batch with it.
+        lo, hi = self._info.canvas(tid.z).tile_span(tid.pos[0])
+
         if selector.precomputed_tiles:
             # The stored assignment IS the answer. Legacy runs this query and
             # then applies the same coordinate post-filter as the other
@@ -255,7 +266,6 @@ class BedDbTileset(BaseTileset):
             # deliberately put in this tile.
             query = selector.tile_query_3t(tid.z, tid.pos[0])
         else:
-            lo, hi = self._info.canvas(tid.z).tile_span(tid.pos[0])
             query = selector.tile_query(tid.z, lo, hi)
 
         rows = self.conn.cursor().execute(query)
