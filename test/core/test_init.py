@@ -33,6 +33,32 @@ ERROR_NAMES = sorted(
 )
 
 
+def test___all___should_export_the_payload_types_the_protocols_name():
+    """Test that an implementer can name what the exported protocols return.
+
+    Given:
+        The facade, which exports ``Tileset`` and ``ProvidesRegions``.
+    When:
+        The payload types those protocols are annotated with are looked up.
+    Then:
+        It should export all of them. ``Tileset.tiles`` returns a ``TileKind``
+        and ``ProvidesRegions.regions`` a list of ``AnnotationRecord``, so a
+        third party implementing either could not annotate its own return
+        type from the package it implements.
+    """
+    # Arrange
+    names = [
+        "TileKind",
+        "AnnotationRecord",
+        "Annotation2DRecord",
+        "ErrorTilePayload",
+    ]
+
+    # Act & assert
+    assert [n for n in names if n not in core.__all__] == []
+    assert [n for n in names if not hasattr(core, n)] == []
+
+
 def test___all___should_support_a_star_import():
     """Test the facade against the import form that reads ``__all__``.
 
