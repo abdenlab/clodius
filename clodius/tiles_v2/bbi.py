@@ -275,8 +275,20 @@ def fetch_records(f, gr: GenomicRange) -> list[tuple]:
     return [(chrom,) + record for record in f.records(chrom, start, end)]
 
 
-def to_bedlike(record: tuple, chrom_offset: int) -> AnnotationRecord:
-    """One raw record as the client's bedlike shape."""
+def to_bedlike(
+    record: tuple, offsets: dict[str, int]
+) -> AnnotationRecord | None:
+    """One raw record as the client's bedlike shape.
+
+    ``None`` for a contig absent from ``offsets``: it has no place on the
+    canvas, so there is nothing to convert it to. The converter owns the
+    lookup rather than the call site, matching `to_interaction` below and the
+    three converters outcome 8 fixed.
+    """
+    chrom_offset = offsets.get(record[0])
+    if chrom_offset is None:
+        return None
+
     # `usedforsecurity=False` for the same reason `stable_importance` carries
     # it: a bucketing hash, not a security primitive. Without it this call
     # raises first on a FIPS-enforcing build, so the flag downstream never
@@ -322,7 +334,9 @@ class BBIAnnotationTileset(BBITileset):
             records.extend(fetch_records(self.file, gr))
 
         offsets = chromsizes.offsets
-        rows = [to_bedlike(r, offsets[r[0]]) for r in records]
+        rows = [
+            row for r in records if (row := to_bedlike(r, offsets)) is not None
+        ]
         # `take_most_important` owns what a cap of None means; restating it
         # here would leave two surfaces encoding one rule.
         return take_most_important(

@@ -38,6 +38,7 @@ from clodius.tiles_v2.bbi import (
     BBIInteraction2DTileset,
     BBIInteractionLinksTileset,
     BBISignalTileset,
+    to_bedlike,
 )
 
 #: Totals 3000 bp, which a four-bin tile size covers with a quadtree extent of
@@ -350,6 +351,45 @@ def test_tiles_should_place_records_by_the_ordering_the_tile_selects(bigbed):
     # Assert
     assert [r["xStart"] for r in selected] == [r["xStart"] for r in expected]
     assert selected != []
+
+
+def test_to_bedlike_should_return_none_when_the_contig_is_unknown():
+    """Test the converter's own contig check. A regression guard, not a pin.
+
+    Given:
+        A raw record on a contig the offsets do not name.
+    When:
+        It is converted.
+    Then:
+        It should return ``None``. No call site in the tree can reach this --
+        records are named from the same chromsizes the offsets come from -- so
+        this guards the converter's contract rather than reproducing a defect.
+        The call site used to index the map directly, and a ``KeyError`` there
+        is not a ``TileError``, so it would have failed the whole batch.
+    """
+    # Act
+    record = to_bedlike(("cUNKNOWN", 10, 20), {"c1": 0})
+
+    # Assert
+    assert record is None
+
+
+def test_to_bedlike_should_place_a_record_on_a_known_contig():
+    """Test the converter's placing path, so the check above is not vacuous.
+
+    Given:
+        A raw record on a contig the offsets name.
+    When:
+        It is converted.
+    Then:
+        It should return a record positioned at that contig's offset.
+    """
+    # Act
+    record = to_bedlike(("c2", 10, 20), {"c1": 0, "c2": 1000})
+
+    # Assert
+    assert record is not None
+    assert (record["xStart"], record["xEnd"]) == (1010, 1020)
 
 
 def test_tiles_should_return_an_error_payload_for_a_tile_off_the_canvas(
