@@ -133,17 +133,20 @@ class MultivecTileset(BaseTileset):
         tile_size = self.tile_size
         n_rows = self._n_rows(resolutions[0])
 
-        info = TilesetInfo(
+        # Row metadata is passed in rather than assigned afterwards:
+        # TilesetInfo is frozen, and assigning to a frozen model raises a
+        # pydantic ValidationError -- which is not a TilesetError, and so
+        # escapes the server boundary as a 500 from `info()`, killing
+        # `tileset_info` and every tile for the file.
+        return TilesetInfo(
             min_pos=[0],
             max_pos=[chromsizes.total_length],
             resolutions=list(resolutions),
             tile_size=tile_size,
             chromsizes=chromsizes.to_pairs(),
             shape=[tile_size, n_rows],
+            **self._row_metadata(),
         )
-        for field, value in self._row_metadata().items():
-            setattr(info, field, value)
-        return info
 
     def _n_rows(self, resolution: int) -> int:
         grp = self.file[f"resolutions/{resolution}/values"]
