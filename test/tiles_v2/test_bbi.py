@@ -32,13 +32,14 @@ import pybigtools
 import pytest
 
 from clodius.core.coords import Chromsizes
-from clodius.core.policies import TilePolicy
+from clodius.core.policies import LinkPolicy, TilePolicy
 from clodius.tiles_v2.bbi import (
     BBIAnnotationTileset,
     BBIInteraction2DTileset,
     BBIInteractionLinksTileset,
     BBISignalTileset,
     to_bedlike,
+    to_interaction,
 )
 
 #: Totals 3000 bp, which a four-bin tile size covers with a quadtree extent of
@@ -84,11 +85,20 @@ def bigbed(tmp_path_factory):
     return path
 
 
-def interact_record(name, source, target):
+def interact_record(name, source, target, value="0"):
     """One bed5+13 interact row, as the tab-joined rest of a bigBed record.
 
     The hull is the record's own start and end; the anchors live in the custom
     fields, which is what makes this schema worth a fixture of its own.
+
+    Fifteen fields, not thirteen. `sourceName` and `sourceStrand` sit between
+    the source and target anchors, and omitting them shifts every target index
+    by two -- `TARGET_CHROM` reads the target *start* -- so the record is two
+    fields short of `INTERACT_FIELDS` and `to_interaction` refuses it outright.
+    Nothing caught that while the fixture was only ever read by `info()` tests.
+
+    ``value`` lands at the index `to_interaction` reads as `importance`; a
+    non-numeric one exercises the digest fallback.
     """
     source_chrom, source_start, source_end = source
     target_chrom, target_start, target_end = target
@@ -96,17 +106,19 @@ def interact_record(name, source, target):
         [
             name,
             "0",
-            "+",
+            str(value),
             "hg38",
             "0",
             source_chrom,
             str(source_start),
             str(source_end),
-            "0,0,0",
+            f"{name}_src",
+            "+",
             target_chrom,
             str(target_start),
             str(target_end),
-            "0,0,0",
+            f"{name}_tgt",
+            "-",
         ]
     )
 
@@ -143,6 +155,67 @@ def bigInteract(tmp_path_factory):
     return path
 
 
+#: A single 1000 bp contig, so the quadtree extent is 1024 and a zoom-3 tile
+#: spans 128 bp -- small enough to place anchors in known tiles by hand.
+LINK_CHROMSIZES = {"c1": 1000}
+
+
+@pytest.fixture(scope="module")
+def bigInteractLinks(tmp_path_factory):
+    """Three interactions that separate the three link policies at one tile.
+
+    At zoom 3 tile 1 spans [128, 256): ``near`` has both anchors inside,
+    ``straddle`` has one, and ``spanner`` has neither but a hull that crosses.
+    """
+    path = str(tmp_path_factory.mktemp("bbi") / "links.bb")
+    pybigtools.open(path, "w").write(
+        LINK_CHROMSIZES,
+        iter(
+            [
+                (
+                    "c1",
+                    10,
+                    190,
+                    interact_record(
+                        "straddle", ("c1", 10, 20), ("c1", 180, 190)
+                    ),
+                ),
+                (
+                    "c1",
+                    10,
+                    310,
+                    interact_record(
+                        "spanner", ("c1", 10, 20), ("c1", 300, 310)
+                    ),
+                ),
+                (
+                    "c1",
+                    140,
+                    210,
+                    interact_record("near", ("c1", 140, 150), ("c1", 200, 210))
+                ),
+            ]
+        ),
+    )
+    return path
+
+
+def interaction_tuple(value="0", source=("c1", 10, 20), target=("c1", 30, 40)):
+    """An 18-field interact record as ``fetch_records`` returns one."""
+    src_chrom, src_start, src_end = source
+    tgt_chrom, tgt_start, tgt_end = target
+    return (
+        src_chrom, 10, 40, "link", "0", str(value), "hg38", "0",
+        src_chrom, str(src_start), str(src_end), "src", "+",
+        tgt_chrom, str(tgt_start), str(tgt_end), "tgt", "-",
+    )
+
+
+def link_names(payload):
+    """The name column of each served interaction."""
+    return sorted(r["fields"][3] for r in payload)
+
+
 def bin_count(payload):
     """Bins in a dense payload, discounting values-per-bin."""
     values = np.frombuffer(
@@ -152,35 +225,193 @@ def bin_count(payload):
 
 
 @pytest.mark.parametrize(
-    "cls,fixture",
-    [(BBISignalTileset, "bigwig"), (BBIAnnotationTileset, "bigbed")],
-    ids=["signal", "annotation"],
+    "policy,expected",
+    [
+        (LinkPolicy.BOTH, ["near"]),
+        (LinkPolicy.EITHER, ["near", "straddle"]),
+        (LinkPolicy.HULL, ["near", "spanner", "straddle"]),
+    ],
+    ids=["both", "either", "hull"],
 )
-def test_info_should_pad_the_range_to_the_quadtree_extent(
-    cls, fixture, request
+def test_tiles_should_select_the_links_the_policy_asks_for(
+    bigInteractLinks, policy, expected
 ):
-    """Test the padded axis both concrete tilesets advertise.
+    """Test the three link policies against a tile that separates them.
 
     Given:
-        A BBI file over a 3000 bp genome, whose quadtree extent is 4096.
+        A bigInteract holding one link with both anchors in the tile, one with
+        a single anchor in it, and one with neither but a hull that crosses
+        it, served under each policy.
     When:
-        Its info is requested.
+        That tile is served.
     Then:
-        ``max_pos`` should be the extent, not the genome length. The client
-        positions tiles on this axis, so reporting the genome length there
-        puts every tile at the wrong scale -- and because the padding is
-        applied by a copy that validates nothing, a misspelled update key
-        produces exactly that while raising no error at all.
+        Each policy should return a different set -- ``both`` the one link,
+        ``either`` adding the single-anchor link, ``hull`` adding the link
+        that merely passes over. Nothing else distinguishes ``BOTH`` from
+        ``HULL``, so without this the two arms are interchangeable.
     """
     # Arrange
-    tileset = cls(request.getfixturevalue(fixture), tile_size=TILE_SIZE)
+    tileset = BBIInteractionLinksTileset(
+        bigInteractLinks, link_policy=policy, tile_size=TILE_SIZE
+    )
 
     # Act
-    info = tileset.info()
+    (_, payload), = tileset.tiles([tileset.parse_tile_id("u.3.1")])
 
     # Assert
-    assert info.max_pos == [QUADTREE_EXTENT]
-    assert info.max_width == QUADTREE_EXTENT
+    assert link_names(payload) == expected
+
+
+def test_tiles_should_default_to_the_either_link_policy(bigInteractLinks):
+    """Test the policy a links tileset takes when none is named.
+
+    Given:
+        A links tileset constructed with no ``link_policy``.
+    When:
+        The separating tile is served.
+    Then:
+        It should return what ``either`` returns. The default governs the
+        scan-versus-seek choice as well as the selection, so it is worth
+        pinning rather than reading off the signature.
+    """
+    # Arrange
+    tileset = BBIInteractionLinksTileset(
+        bigInteractLinks, tile_size=TILE_SIZE
+    )
+
+    # Act
+    (_, payload), = tileset.tiles([tileset.parse_tile_id("u.3.1")])
+
+    # Assert
+    assert link_names(payload) == ["near", "straddle"]
+
+
+@pytest.mark.parametrize(
+    "pos,expected",
+    [("1.1", ["near"]), ("1.0", []), ("0.2", ["spanner"])],
+)
+def test_tiles_should_place_an_interaction_in_its_own_2d_cell(
+    bigInteractLinks, pos, expected
+):
+    """Test that a 2D tile returns only the links both of its axes admit.
+
+    Given:
+        A bigInteract whose links put their two anchors in known tile columns.
+    When:
+        Cells on and off the diagonal are served.
+    Then:
+        Each should return only the link whose source falls in the x column
+        and whose target falls in the y column. The index query matches on the
+        hull, so it returns links the y filter must then reject -- the
+        ``(1, 0)`` cell is that case.
+    """
+    # Arrange
+    tileset = BBIInteraction2DTileset(bigInteractLinks, tile_size=TILE_SIZE)
+
+    # Act
+    (_, payload), = tileset.tiles([tileset.parse_tile_id(f"u.3.{pos}")])
+
+    # Assert
+    assert link_names(payload) == expected
+
+
+def test_tiles_should_refuse_a_2d_tile_whose_y_is_off_the_canvas(
+    bigInteractLinks,
+):
+    """Test the axis the restored bounds check is the only screen for.
+
+    Given:
+        A 2D tileset and a tile whose x exists but whose y is past the last
+        tile at that zoom.
+    When:
+        It is served.
+    Then:
+        It should return a ``TileOutOfBounds`` payload rather than an empty
+        tile. ``y`` reaches ``tile_span`` and nothing else, so this is the one
+        position the guard restored in ``TileCanvas`` is the sole check on --
+        and an unchecked one yields a well-formed range past the genome, zero
+        rows, and a tile a client cannot tell from "no interactions here".
+    """
+    # Arrange
+    tileset = BBIInteraction2DTileset(bigInteractLinks, tile_size=TILE_SIZE)
+
+    # Act
+    (_, payload), = tileset.tiles([tileset.parse_tile_id("u.3.1.99")])
+
+    # Assert
+    assert payload["error_type"] == "TileOutOfBounds"
+
+
+def test_to_interaction_should_rank_by_the_records_value_column():
+    """Test the importance an interact record carries in its own fields.
+
+    Given:
+        An 18-field record whose value column is numeric.
+    When:
+        It is converted.
+    Then:
+        Its importance should be that value, so a client ranks links the way
+        the file says rather than by an arbitrary digest.
+    """
+    # Act
+    record = to_interaction(interaction_tuple(value="7.5"), {"c1": 0})
+
+    # Assert
+    assert record["importance"] == 7.5
+
+
+def test_to_interaction_should_fall_back_to_the_digest_for_a_bad_value():
+    """Test a value column that is not a number, which interact permits.
+
+    Given:
+        An 18-field record whose value column is non-numeric.
+    When:
+        It is converted.
+    Then:
+        Its importance should be a stable digest in the unit interval rather
+        than raising -- ranking has to stay total over real files.
+    """
+    # Act
+    record = to_interaction(interaction_tuple(value="."), {"c1": 0})
+
+    # Assert
+    assert 0.0 <= record["importance"] < 1.0
+
+
+def test_to_interaction_should_return_none_when_an_anchor_is_unplaceable():
+    """Test a record naming a contig the coordinate system does not.
+
+    Given:
+        A record whose target anchor sits on an unknown contig.
+    When:
+        It is converted.
+    Then:
+        It should return ``None``. A ``KeyError`` here is not a ``TileError``,
+        so it would fail the whole batch rather than drop one link.
+    """
+    # Act
+    record = to_interaction(
+        interaction_tuple(target=("cUNKNOWN", 30, 40)), {"c1": 0}
+    )
+
+    # Assert
+    assert record is None
+
+
+def test_to_interaction_should_raise_when_the_record_is_not_bed5_plus_13():
+    """Test a bigBed that is not an interact file at all.
+
+    Given:
+        A record with fewer than eighteen fields.
+    When:
+        It is converted.
+    Then:
+        It should raise ``ValueError`` naming the schema, rather than reading
+        a target coordinate out of whichever column happens to be there.
+    """
+    # Act & assert
+    with pytest.raises(ValueError, match="bed5\\+13"):
+        to_interaction(interaction_tuple()[:16], {"c1": 0})
 
 
 def test_info_should_keep_the_type_specific_fields(bigwig):
