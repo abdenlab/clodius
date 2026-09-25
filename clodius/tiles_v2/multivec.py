@@ -73,7 +73,7 @@ class MultivecTileset(BaseTileset):
         self._path = path
         self._file = None
         self._info = None
-        self.policy = policy or None
+        self.policy = policy or TilePolicy()
         self.tile_size = tile_size or int(self.file["info"].attrs["tile-size"])
 
     # --- resource lifetime --------------------------------------------------

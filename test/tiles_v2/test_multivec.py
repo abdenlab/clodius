@@ -23,6 +23,7 @@ import h5py
 import numpy as np
 import pytest
 
+from clodius.core.policies import TilePolicy
 from clodius.core.tileset import TilesetInfo
 from clodius.tiles_v2.multivec import MultivecTileset
 
@@ -131,6 +132,45 @@ class TestMultivecTileset:
 
         # Assert
         assert "row_infos" not in served
+
+    def test___init___should_hold_a_policy_when_given_none(self, bare_mv5):
+        """Test the attribute the ``Tileset`` protocol declares non-optional.
+
+        Given:
+            A multivec tileset constructed with no policy.
+        When:
+            Its policy is read.
+        Then:
+            It should be a ``TilePolicy``. Collapsing a falsy policy to
+            ``None`` -- the same ``X or None`` construct the options slot was
+            fixed for -- hands back a value contradicting the protocol, and
+            every read of it is an ``AttributeError`` rather than a
+            ``TilesetError``, so it escapes the boundary as a 500.
+        """
+        # Act
+        tileset = MultivecTileset(bare_mv5)
+
+        # Assert
+        assert isinstance(tileset.policy, TilePolicy)
+
+    def test___init___should_hold_the_policy_it_is_given(self, bare_mv5):
+        """Test that supplying a policy still works, so the default is a default.
+
+        Given:
+            A multivec tileset constructed with an explicit policy.
+        When:
+            Its policy is read.
+        Then:
+            It should be the object given, not a substituted default.
+        """
+        # Arrange
+        policy = TilePolicy(max_records=7)
+
+        # Act
+        tileset = MultivecTileset(bare_mv5, policy=policy)
+
+        # Assert
+        assert tileset.policy is policy
 
     def test_info_should_return_a_frozen_model(self, stateful_mv5):
         """Test that the metadata did not arrive by unfreezing the model.
