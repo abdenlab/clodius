@@ -284,11 +284,14 @@ class BedTileset(BaseTileset):
 
         offsets = self._chromsizes.offsets
 
-        # Filtered before capping: an unknown contig that consumed a cap slot
-        # would silently shorten the tile.
-        frame = frame.filter(self._known_chroms).with_columns(
-            _digest=self._digest_expr()
-        )
+        # Only on the scan path, and before capping: an unknown contig that
+        # consumed a cap slot would silently shorten the tile. The indexed
+        # branch queries regions named by `canvas.invert`, i.e. drawn from the
+        # very chromsizes this tests against, so there is no row for it to
+        # drop -- 0.4-0.8 ms per tile spent proving that.
+        if not self._is_indexed:
+            frame = frame.filter(self._known_chroms)
+        frame = frame.with_columns(_digest=self._digest_expr())
 
         # Bounded-memory downsampling: `top_k` keeps a heap of `cap` rows, so
         # peak memory does not depend on how many records the tile covers.

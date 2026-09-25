@@ -295,23 +295,31 @@ def test_regions_should_skip_a_record_on_an_unknown_contig(make_bed):
     assert all(r["fields"][0] != "cUNKNOWN" for r in rows)
 
 
-def test_tiles_should_not_let_an_unknown_contig_consume_a_cap_slot(make_bed):
-    """Test the record cap against rows that cannot be placed.
+@pytest.mark.parametrize("indexed", [False, True])
+def test_tiles_should_not_let_an_unknown_contig_consume_a_cap_slot(
+    make_bed, make_bed_bgzf, indexed
+):
+    """Test the record cap against rows that cannot be placed, on both paths.
 
     Given:
         A BED where unplaceable records outnumber the placeable ones, served
-        under a cap smaller than the placeable count.
+        under a cap smaller than the placeable count, read both by scanning
+        and through a tabix index.
     When:
         The whole-genome tile is requested.
     Then:
-        It should return a full tile of placeable records. The cap ranks rows
-        by digest, so an unplaceable row that survives the ranking and is
-        dropped afterwards silently shortens the tile -- the filter has to run
-        before the cap, not after it.
+        It should return a full tile of placeable records on either path. The
+        cap ranks rows by digest, so an unplaceable row that survives the
+        ranking and is dropped afterwards silently shortens the tile -- the
+        filter has to run before the cap, not after it. The indexed row is a
+        regression guard rather than a pin: a region query is built from the
+        chromsizes it is tested against, so it cannot return an unknown contig
+        and the explicit filter there was provably dead work. This says so.
     """
     # Arrange
     noise = [("cUNKNOWN", i * 10, i * 10 + 5, f"z{i}") for i in range(50)]
-    path = make_bed(noise + RECORDS, name="noisy.bed")
+    build = make_bed_bgzf if indexed else make_bed
+    path = build(noise + RECORDS, name="noisy.bed")
     tileset = BedTileset(
         path, CHROMSIZES, policy=TilePolicy(max_records=3)
     )
