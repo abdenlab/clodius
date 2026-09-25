@@ -1,5 +1,6 @@
 from __future__ import annotations
 import hashlib
+import heapq
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable, Iterable, Sequence, TypeVar
@@ -26,6 +27,19 @@ class TilePolicy:
 
     # Refuse to scan an unindexed file larger than this.
     max_scan_bytes: int = 20_000_000
+
+    def __post_init__(self) -> None:
+        # Validated here rather than at the four capping sites. `TilePolicy` is
+        # re-exported from `clodius.core` and constructed directly by every
+        # caller, so this is the only place all of them pass through. A
+        # negative `max_records` is the dangerous one: `take_most_important`
+        # and `gxf` read it as "serve nothing", while polars' `top_k` raises
+        # `OverflowError` -- not a `TilesetError`, so it escapes the per-tile
+        # boundary and takes the whole batch. One rule, one encoding.
+        for name in ("max_span", "max_records", "max_scan_bytes"):
+            value = getattr(self, name)
+            if value is not None and value < 0:
+                raise ValueError(f"{name} must not be negative, got {value}")
 
     def with_(self, **changes) -> TilePolicy:
         """Return a copy with ``changes`` applied."""
@@ -264,19 +278,29 @@ def stable_importance(key: str) -> float:
     - the ranking is identical at every zoom, so a feature that survives
       thinning at one level survives at the next, instead of flickering.
 
-    Uses the same digest the record's ``uid`` already comes from, so no new
-    hashing is introduced.
+    Takes a second digest, of the key it is handed. Callers that pass a uid
+    which is itself a hexdigest therefore hash twice; slicing the caller's
+    digest instead would be cheaper but would change every importance value,
+    and so which records survive thinning.
     """
-    digest = hashlib.md5(key.encode("utf8")).hexdigest()
+    # `usedforsecurity=False` marks this as a bucketing hash rather than a
+    # security primitive, so it keeps working on a FIPS-enforcing build where
+    # md5 is otherwise refused.
+    digest = hashlib.md5(key.encode("utf8"), usedforsecurity=False).hexdigest()
     return int(digest[:8], 16) / 0x1_0000_0000
 
 
 def take_most_important(
     records: Sequence[T],
-    cap: int,
+    cap: int | None,
     importance: Callable[[T], float],
 ) -> list[T]:
     """The ``cap`` most important records, in their original order.
+
+    ``cap`` of ``None`` means no limit, matching `TilePolicy`. A ``cap``
+    of zero or less returns nothing: ``ranked[-0:]`` is the whole list, so
+    without this guard a server configured to serve no records would emit an
+    unbounded tile -- the precise failure the cap exists to prevent.
 
     Deterministic, unlike ``random.choices``, which additionally samples *with
     replacement* and so can return the same record twice while dropping another
@@ -285,10 +309,23 @@ def take_most_important(
     Order is preserved rather than sorted by importance: the client positions
     records by coordinate, and keeping genomic order makes the output easier to
     diff against the unthinned set.
+
+    Selected with a heap rather than a full sort, for the reason `bed.py` gives
+    for using polars' ``top_k``: the working set is bounded by ``cap`` instead
+    of by how many records the tile covers. A full sort of two million records
+    also allocated a 112 MB index list to rank them.
     """
+    if cap is None:
+        return list(records)
+    if cap <= 0:
+        return []
     if len(records) <= cap:
         return list(records)
 
-    ranked = sorted(range(len(records)), key=lambda i: importance(records[i]))
-    keep = set(ranked[-cap:])
+    keep = {
+        i
+        for i, _ in heapq.nlargest(
+            cap, enumerate(records), key=lambda pair: importance(pair[1])
+        )
+    }
     return [r for i, r in enumerate(records) if i in keep]
