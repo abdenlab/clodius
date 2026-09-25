@@ -1,5 +1,6 @@
 from __future__ import annotations
 import hashlib
+import heapq
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable, Iterable, Sequence, TypeVar
@@ -308,6 +309,11 @@ def take_most_important(
     Order is preserved rather than sorted by importance: the client positions
     records by coordinate, and keeping genomic order makes the output easier to
     diff against the unthinned set.
+
+    Selected with a heap rather than a full sort, for the reason `bed.py` gives
+    for using polars' ``top_k``: the working set is bounded by ``cap`` instead
+    of by how many records the tile covers. A full sort of two million records
+    also allocated a 112 MB index list to rank them.
     """
     if cap is None:
         return list(records)
@@ -316,6 +322,10 @@ def take_most_important(
     if len(records) <= cap:
         return list(records)
 
-    ranked = sorted(range(len(records)), key=lambda i: importance(records[i]))
-    keep = set(ranked[-cap:])
+    keep = {
+        i
+        for i, _ in heapq.nlargest(
+            cap, enumerate(records), key=lambda pair: importance(pair[1])
+        )
+    }
     return [r for i, r in enumerate(records) if i in keep]

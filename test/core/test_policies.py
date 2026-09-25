@@ -395,7 +395,7 @@ def test_take_most_important_should_accept_an_unhashable_record():
     assert [r["uid"] for r in result] == ["b", "c"]
 
 
-def test_take_most_important_should_keep_the_last_of_equally_ranked_records():
+def test_take_most_important_should_keep_the_first_of_equally_ranked_records():
     """Test the tie-break, which the cap reaches on any unranked format.
 
     Given:
@@ -403,13 +403,14 @@ def test_take_most_important_should_keep_the_last_of_equally_ranked_records():
     When:
         They are thinned.
     Then:
-        It should keep the last two. This pins observed behavior rather than a
-        settled contract -- the sort is stable and the slice takes the tail,
-        so the later records win. If earlier ones should, this is the
-        assertion to invert.
+        It should keep the first two. This pins observed behavior rather than
+        a settled contract: the heap is fed in input order and breaks a tie
+        toward what it saw first. It answered ``["c", "d"]`` while the
+        selection was a stable sort sliced from the tail -- the records
+        returned changed, their count and their relative order did not.
     """
     # Act
     result = take_most_important(["a", "b", "c", "d"], 2, lambda r: 1.0)
 
     # Assert
-    assert result == ["c", "d"]
+    assert result == ["a", "b"]
