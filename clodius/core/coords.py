@@ -305,7 +305,12 @@ class TileCanvas:
         # from clodius.core and can be constructed directly -- where a zero
         # tile size or binsize surfaced as ZeroDivisionError from a property,
         # and a negative extent constructed silently.
-        if self.binsize <= 0:
+        # Inverted rather than `<= 0`: binsize is a float, and `nan <= 0` is
+        # False, so the straightforward spelling admits NaN and lets it surface
+        # as a ValueError from `n_bins` -- one step removed from the argument
+        # that was actually wrong, which is the failure this guard exists to
+        # prevent.
+        if not self.binsize > 0:
             raise ValueError(f"binsize must be positive, got {self.binsize}")
         if self.tile_size <= 0:
             raise ValueError(
