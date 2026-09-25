@@ -22,9 +22,10 @@ import json
 import h5py
 import numpy as np
 import pytest
+from pydantic import ValidationError
 
-from clodius.core.policies import TilePolicy
 from clodius.core.errors import MalformedTileId
+from clodius.core.policies import TilePolicy
 from clodius.core.tileset import TilesetInfo
 from clodius.tiles_v2.multivec import MultivecTileset
 
@@ -85,6 +86,100 @@ def bare_mv5(tmp_path_factory):
 
 class TestMultivecTileset:
     """Serving a multivec whose info carries metadata the model never declared."""
+
+    def test___init___should_hold_a_policy_when_given_none(self, bare_mv5):
+        """Test the attribute the ``Tileset`` protocol declares non-optional.
+
+        Given:
+            A multivec tileset constructed with no policy.
+        When:
+            Its policy is read.
+        Then:
+            It should be a ``TilePolicy``. Collapsing a falsy policy to
+            ``None`` -- the same ``X or None`` construct the options slot was
+            fixed for -- hands back a value contradicting the protocol, and
+            every read of it is an ``AttributeError`` rather than a
+            ``TilesetError``, so it escapes the boundary as a 500.
+        """
+        # Act
+        tileset = MultivecTileset(bare_mv5)
+
+        # Assert
+        assert isinstance(tileset.policy, TilePolicy)
+
+    def test___init___should_hold_the_policy_it_is_given(self, bare_mv5):
+        """Test that supplying a policy still works, so the default is a default.
+
+        Given:
+            A multivec tileset constructed with an explicit policy.
+        When:
+            Its policy is read.
+        Then:
+            It should be the object given, not a substituted default.
+        """
+        # Arrange
+        policy = TilePolicy(max_records=7)
+
+        # Act
+        tileset = MultivecTileset(bare_mv5, policy=policy)
+
+        # Assert
+        assert tileset.policy is policy
+
+    def test_tiles_should_raise_when_the_aggregation_function_is_invalid(
+        self, bare_mv5
+    ):
+        """Test a batch option that names something this tileset cannot do.
+
+        Given:
+            A batch carrying an ``aggFunc`` that is not one of the supported
+            functions.
+        When:
+            The batch is served.
+        Then:
+            It should raise ``MalformedTileId`` rather than return an error
+            payload per tile. Options arrive once for the whole request, so a
+            bad one is a whole-batch failure -- and nothing else in the suite
+            can tell those two answers apart.
+        """
+        # Arrange
+        tileset = MultivecTileset(bare_mv5)
+        ids = [tileset.parse_tile_id("u.0.0"), tileset.parse_tile_id("u.0.1")]
+
+        # Act & assert
+        with pytest.raises(MalformedTileId, match="aggFunc"):
+            tileset.tiles(ids, {"aggGroups": [[0, 1]], "aggFunc": "bogus"})
+
+    def test_tiles_should_answer_every_id_when_one_is_off_the_canvas(
+        self, bare_mv5
+    ):
+        """Test the per-tile boundary inside this tileset's own override.
+
+        Given:
+            A batch holding one servable tile and one position far past the
+            end of the canvas.
+        When:
+            The batch is served.
+        Then:
+            It should answer both, the bad one with a ``TileOutOfBounds``
+            payload. The override predates the shared boundary, so it has to
+            carry its own -- the earlier comprehension had none and lost the
+            whole batch to one bad position.
+        """
+        # Arrange
+        tileset = MultivecTileset(bare_mv5)
+        ids = [
+            tileset.parse_tile_id("u.0.0"),
+            tileset.parse_tile_id("u.0.9999"),
+        ]
+
+        # Act
+        served = tileset.tiles(ids)
+
+        # Assert
+        assert len(served) == 2
+        assert "error" not in served[0][1]
+        assert served[1][1]["error_type"] == "TileOutOfBounds"
 
     def test_tiles_should_raise_when_an_option_is_not_recognized(
         self, bare_mv5
@@ -160,45 +255,6 @@ class TestMultivecTileset:
         # Assert
         assert "row_infos" not in served
 
-    def test___init___should_hold_a_policy_when_given_none(self, bare_mv5):
-        """Test the attribute the ``Tileset`` protocol declares non-optional.
-
-        Given:
-            A multivec tileset constructed with no policy.
-        When:
-            Its policy is read.
-        Then:
-            It should be a ``TilePolicy``. Collapsing a falsy policy to
-            ``None`` -- the same ``X or None`` construct the options slot was
-            fixed for -- hands back a value contradicting the protocol, and
-            every read of it is an ``AttributeError`` rather than a
-            ``TilesetError``, so it escapes the boundary as a 500.
-        """
-        # Act
-        tileset = MultivecTileset(bare_mv5)
-
-        # Assert
-        assert isinstance(tileset.policy, TilePolicy)
-
-    def test___init___should_hold_the_policy_it_is_given(self, bare_mv5):
-        """Test that supplying a policy still works, so the default is a default.
-
-        Given:
-            A multivec tileset constructed with an explicit policy.
-        When:
-            Its policy is read.
-        Then:
-            It should be the object given, not a substituted default.
-        """
-        # Arrange
-        policy = TilePolicy(max_records=7)
-
-        # Act
-        tileset = MultivecTileset(bare_mv5, policy=policy)
-
-        # Assert
-        assert tileset.policy is policy
-
     def test_info_should_return_a_frozen_model(self, stateful_mv5):
         """Test that the metadata did not arrive by unfreezing the model.
 
@@ -207,9 +263,12 @@ class TestMultivecTileset:
         When:
             One of its fields is assigned.
         Then:
-            It should raise. Relaxing the model config would make the previous
-            test pass too, and would give back the mutable info whose cached
-            derivations were the reason for freezing it.
+            It should raise ``ValidationError``. The class matters: a bare
+            ``Exception`` here also passes for an ``AttributeError`` or a
+            ``TypeError``, so the test would stay green against a model that
+            is broken in some other way. Relaxing the model config would make
+            the previous test pass too, and would give back the mutable info
+            whose cached derivations were the reason for freezing it.
         """
         # Arrange
         info = MultivecTileset(stateful_mv5).info()
@@ -218,7 +277,7 @@ class TestMultivecTileset:
         assert isinstance(info, TilesetInfo)
 
         # Act & assert
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             info.tile_size = 999
 
     def test_tiles_should_serve_a_file_carrying_row_metadata(

@@ -23,6 +23,7 @@ import os
 import pytest
 
 from clodius.core.coords import Chromsizes
+from clodius.core.errors import TilesetError
 from clodius.core.policies import TilePolicy
 from clodius.tiles_v2.gxf import GffGenesTileset
 
@@ -95,6 +96,105 @@ def make_gff(tmp_path):
 
 class TestGxfTileset:
     """The gene cap, at the boundary the shared helper does not cover."""
+
+    def test_tiles_should_answer_every_id_when_one_is_off_the_canvas(
+        self, make_gff
+    ):
+        """Test the boundary this tileset now inherits instead of overriding.
+
+        Given:
+            A batch holding one servable tile and one position past the last
+            tile at that zoom.
+        When:
+            The batch is served.
+        Then:
+            It should answer both -- the genes for the good id, a
+            ``TileOutOfBounds`` payload for the other. The removed override
+            had no boundary of its own, so a single bad position took the
+            whole request down.
+        """
+        # Arrange
+        tileset = GffGenesTileset(make_gff(GENES), CHROMSIZES)
+        ids = [tileset.parse_tile_id("u.0.0"), tileset.parse_tile_id("u.0.5")]
+
+        # Act
+        served = tileset.tiles(ids)
+
+        # Assert
+        assert len(served) == 2
+        assert len(served[0][1]) == 2
+        assert served[1][1]["error_type"] == "TileOutOfBounds"
+
+    def test_tiles_should_raise_when_an_option_is_passed(self, make_gff):
+        """Test the option refusal the inherited boundary brings with it.
+
+        Given:
+            A tileset that declares it reads no tile options, and a batch
+            carrying one.
+        When:
+            The batch is served.
+        Then:
+            It should raise a ``TilesetError`` for the whole batch. The
+            removed override accepted and discarded options silently, serving
+            tiles that ignored what was asked for.
+        """
+        # Arrange
+        tileset = GffGenesTileset(make_gff(GENES), CHROMSIZES)
+        ids = [tileset.parse_tile_id("u.0.0")]
+
+        # Act & assert
+        with pytest.raises(TilesetError):
+            tileset.tiles(ids, {"aggFunc": "mean"})
+
+    def test_tiles_should_skip_a_gene_on_an_unknown_contig(self, make_gff):
+        """Test a feature the coordinate system cannot place.
+
+        Given:
+            An annotation carrying a gene on a contig the chromsizes omit.
+        When:
+            The whole-genome tile is served.
+        Then:
+            It should return the placeable genes and drop the other, rather
+            than failing the tile on a ``KeyError`` that the boundary cannot
+            render.
+        """
+        # Arrange
+        rows = GENES + [
+            ("cUNKNOWN", "test", "gene", 1, 100, "ID=gz;Name=zeta"),
+        ]
+        tileset = GffGenesTileset(
+            make_gff(rows, name="unknown.gff"), CHROMSIZES
+        )
+
+        # Act
+        (_, records), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+        # Assert
+        assert len(records) == 2
+
+    def test_tiles_should_be_empty_past_the_end_of_the_genome(self, make_gff):
+        """Test the trailing tile every zoom level has.
+
+        Given:
+            Chromsizes whose total leaves a whole tile inside the quadtree
+            extent but past the end of the genome.
+        When:
+            That tile is served.
+        Then:
+            It should return no records rather than raising. The extent always
+            exceeds the genome, so this tile is routine -- and with every
+            range out of bounds the scan predicate has no terms to OR
+            together.
+        """
+        # Arrange
+        chromsizes = Chromsizes.from_pairs([("c1", 1000), ("c2", 1100)])
+        tileset = GffGenesTileset(make_gff(GENES), chromsizes)
+
+        # Act
+        (_, records), = tileset.tiles([tileset.parse_tile_id("u.2.3")])
+
+        # Assert
+        assert records == []
 
     def test_tiles_should_return_the_genes_when_the_cap_is_none(
         self, make_gff
@@ -280,19 +380,19 @@ class TestGxfTileset:
 
         Given:
             An annotation of exons with no gene- or pseudogene-typed row,
-            under a policy capping genes at zero.
+            under a policy capping genes at one.
         When:
             The whole-genome tile is served.
         Then:
-            It should return no records. The cap comparison reads an empty
-            gene index as under the cap and passes every row through
-            unthinned; gene assembly then discards them for want of a gene to
-            root at, so this pins the tile rather than the stage -- the stage's
-            own guard is what keeps the two from having to agree.
+            It should return no records, because gene assembly discards rows
+            with no gene to root them at. The cap is positive on purpose: a
+            cap of zero now returns before the file is read at all, so it
+            would exercise the early refusal rather than the shape this test
+            is named for, and duplicate the cap-of-zero test above.
         """
         # Arrange
         tileset = GffGenesTileset(
-            make_gff(CHILD_ONLY), CHROMSIZES, policy=TilePolicy(max_records=0)
+            make_gff(CHILD_ONLY), CHROMSIZES, policy=TilePolicy(max_records=1)
         )
 
         # Act
