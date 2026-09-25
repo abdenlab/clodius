@@ -4,7 +4,7 @@ import math
 from functools import cached_property
 from enum import Enum
 from collections.abc import Mapping
-from typing import Any, ClassVar, Protocol, Sequence, runtime_checkable
+from typing import Any, ClassVar, Protocol, Self, Sequence, runtime_checkable
 
 from clodius.core.coords import TileCanvas, Chromsizes
 from clodius.core.tile import AnnotationRecord, TileKind
@@ -268,7 +268,7 @@ class DatasetInfo(BaseModel):
     # while every instance raised TypeError.
     __hash__ = None
 
-    def with_(self, **changes: Any) -> "DatasetInfo":
+    def with_(self, **changes: Any) -> Self:
         """A copy with ``changes`` applied, re-validated.
 
         Unlike ``model_copy(update=...)`` this runs the constructor, so a
