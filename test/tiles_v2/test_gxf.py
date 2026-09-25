@@ -34,6 +34,35 @@ GENES = [
     ("c1", "test", "exon", 211, 220, "ID=e2;Parent=g2"),
 ]
 
+#: Five genes carrying no ``ID=``, which GFF3 permits. The dialect reads no
+#: id from them, so anything keyed on that id counts none of them -- while
+#: gene assembly synthesizes one and emits all five.
+GENES_NO_ID = [
+    row
+    for i in range(5)
+    for row in (
+        ("c1", "test", "gene", 1 + i * 100, 50 + i * 100, f"Name=g{i}"),
+        (
+            "c1",
+            "test",
+            "exon",
+            11 + i * 100,
+            20 + i * 100,
+            f"Parent=gene_{1 + i * 100}_{50 + i * 100}",
+        ),
+    )
+]
+
+#: The same five genes, each carrying an ``ID=``. The control.
+GENES_WITH_ID = [
+    row
+    for i in range(5)
+    for row in (
+        ("c1", "test", "gene", 1 + i * 100, 50 + i * 100, f"ID=g{i};Name=g{i}"),
+        ("c1", "test", "exon", 11 + i * 100, 20 + i * 100, f"Parent=g{i}"),
+    )
+]
+
 #: Rows typed only ``exon``, so the gene index stays empty.
 CHILD_ONLY = [
     ("c1", "test", "exon", 11, 20, "ID=e1;Parent=t1"),
@@ -135,6 +164,59 @@ class TestGxfTileset:
 
         # Assert
         assert records == []
+
+    def test_tiles_should_apply_the_cap_when_no_gene_row_carries_an_id(
+        self, make_gff
+    ):
+        """Test a positive cap against genes the dialect reads no id from.
+
+        Given:
+            Five ``ID=``-less genes, which GFF3 permits, under a policy
+            capping genes at two.
+        When:
+            The whole-genome tile is served.
+        Then:
+            It should return two genes. Counting by id counted none of them
+            while gene assembly synthesized one per row and emitted all five,
+            so every positive cap passed the tile through whole.
+        """
+        # Arrange
+        tileset = GffGenesTileset(
+            make_gff(GENES_NO_ID), CHROMSIZES, policy=TilePolicy(max_records=2)
+        )
+
+        # Act
+        (_, records), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+        # Assert
+        assert len(records) == 2
+
+    def test_tiles_should_apply_the_cap_when_every_gene_row_carries_an_id(
+        self, make_gff
+    ):
+        """Test the control for the ``ID=``-less case above.
+
+        Given:
+            The same five genes, each carrying an ``ID=``, under the same cap
+            of two.
+        When:
+            The whole-genome tile is served.
+        Then:
+            It should also return two genes -- so the case above pins the
+            missing id rather than anything about the cap itself.
+        """
+        # Arrange
+        tileset = GffGenesTileset(
+            make_gff(GENES_WITH_ID),
+            CHROMSIZES,
+            policy=TilePolicy(max_records=2),
+        )
+
+        # Act
+        (_, records), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+        # Assert
+        assert len(records) == 2
 
     def test_tiles_should_return_nothing_when_no_row_carries_a_gene(
         self, make_gff
