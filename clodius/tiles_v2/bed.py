@@ -161,6 +161,9 @@ class BedTileset(BaseTileset):
         self.policy = policy or TilePolicy()
         self.tile_size = tile_size
         self._chromsizes = chromsizes
+        # Built once: the chromsizes are fixed for the tileset's life, and the
+        # polars Series behind `is_in` is not free to rebuild per tile.
+        self._known_chroms = pl.col("chrom").is_in(list(chromsizes.offsets))
         self._info = self._build_info()
         self._checked_size = False
 
@@ -288,7 +291,7 @@ class BedTileset(BaseTileset):
 
         # Filtered before capping: an unknown contig that consumed a cap slot
         # would silently shorten the tile.
-        frame = frame.filter(pl.col("chrom").is_in(list(offsets))).with_columns(
+        frame = frame.filter(self._known_chroms).with_columns(
             _digest=self._digest_expr()
         )
 
