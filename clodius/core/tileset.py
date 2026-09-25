@@ -242,9 +242,30 @@ class Ladder(str, Enum):
 
 
 class DatasetInfo(BaseModel):
-    """Fields common to anything servable, tiled or not."""
+    """Fields common to anything servable, tiled or not.
 
-    model_config = ConfigDict(extra="allow")
+    Frozen, like :class:`TilesetInfo`. Both are public and `Dataset.info()`
+    is annotated with this one, so code written against the base's contract
+    would otherwise type-check and then fail only on the subclass. Derive a
+    variant with :meth:`with_`.
+    """
+
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    # `frozen=True` makes pydantic synthesize a hash over the fields, and
+    # `min_pos`/`max_pos` are lists -- so the type would advertise Hashable
+    # while every instance raised TypeError.
+    __hash__ = None
+
+    def with_(self, **changes: Any) -> "DatasetInfo":
+        """A copy with ``changes`` applied, re-validated.
+
+        Unlike ``model_copy(update=...)`` this runs the constructor, so a
+        misspelled key or an out-of-range value is rejected rather than served
+        verbatim, and any cached derivation is rebuilt from the new fields
+        instead of surviving the copy. Mirrors `TilePolicy.with_`.
+        """
+        return type(self)(**{**self.model_dump(exclude_none=True), **changes})
 
     min_pos: list[int]
     max_pos: list[int]
@@ -273,14 +294,18 @@ class TilesetInfo(DatasetInfo):
     Frozen. The `coordinate_system` cached on it is only sound because the
     field it reads cannot change underneath it.
 
-    Derive a variant with ``model_copy(update=...)``, bearing in mind that it
-    neither validates the update nor drops the cache: a misspelled key is
-    served verbatim, an out-of-range value is accepted where the constructor
-    would reject it, and a copy updating ``chromsizes`` keeps the coordinate
-    system derived from the old ones. Prefer constructing when either matters.
+    Derive a variant with :meth:`with_`, which re-validates and rebuilds the
+    cache. ``model_copy(update=...)`` does neither: a misspelled key is served
+    verbatim, an out-of-range value is accepted where the constructor would
+    reject it, and a copy updating ``chromsizes`` keeps the coordinate system
+    derived from the old ones.
     """
 
     model_config = ConfigDict(extra="allow", frozen=True)
+
+    # Inherited from DatasetInfo in intent, restated because pydantic
+    # re-synthesizes a hash for every frozen model.
+    __hash__ = None
 
     # --- ladder, implicit form (power-of-two) ---
     max_zoom: int | None = None
