@@ -246,8 +246,14 @@ class VariantTileset(BaseTileset):
         ``next()`` per skipped record; ``slice`` pushes the row count into the
         reader instead.
         """
-        # Filtered before the slice, so `offset`, `limit` and the next-page
-        # probe all range over the same population. Filtering afterwards lets
+        # Filtered before the slice, which costs the reader-level row limit:
+        # the slice is evaluated above the filter rather than pushed into the
+        # scan node. The streaming engine still stops once the page fills, so
+        # the read is bounded by matching rows rather than by file rows. Do not
+        # "restore" the pushdown by reordering these two.
+        #
+        # Filtered first so `offset`, `limit` and the next-page probe all
+        # range over the same population. Filtering afterwards lets
         # one unplaceable row consume the probe -- `has_next` goes False with
         # records unread -- and leaves `offset` indexing raw file rows while
         # the page is a filtered subset, so consecutive pages overlap.

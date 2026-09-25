@@ -189,9 +189,15 @@ class BedTileset(BaseTileset):
     ) -> tuple[list[AnnotationRecord], bool]:
         """A page of records in file order, plus whether more follow."""
         # Reads ``limit + 1`` rows to answer "is there a next page" without a
-        # count. ``n_rows`` pushes down into the reader, so this touches only the
-        # head of the file rather than parsing all of it as legacy does.
-        # Filtered before the slice, not after. `offset`, `limit` and the
+        # count. The slice sits above the filter rather than inside the scan
+        # node, so it no longer pushes a row count into the reader -- but the
+        # streaming engine still stops once the page fills, which bounds the
+        # read by matching rows instead of by file rows. Measured at ~47 ms
+        # over the pushed-down plan, flat from 250k rows to 4M against 900 ms
+        # for a full scan of the same file.
+        #
+        # Do not "restore" the pushdown by moving the filter back below the
+        # slice. Filtered before the slice, not after. `offset`, `limit` and the
         # probe all have to range over the same population: filtering
         # afterwards lets one unplaceable row consume the probe -- `has_next`
         # goes False with records still unread -- and leaves `offset` indexing
