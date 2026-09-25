@@ -12,6 +12,8 @@ The rest of the module -- ``Chromsizes``, ``GenomicRange``, ``natsorted`` --
 is covered by ``coordinates_test.py``.
 """
 
+import math
+
 import pytest
 
 from clodius.core.coords import Chromsizes, GenomicRange, TileCanvas
@@ -223,3 +225,97 @@ class TestTileCanvasEdges:
         # Act & assert
         with pytest.raises(ValueError, match="chromsizes"):
             list(canvas.invert(9999))
+
+
+class TestTileCanvasAccessors:
+    """The two accessors that map a position, and the bound they share.
+
+    ``invert`` and ``tile_span`` are the same map, one returning genomic
+    intervals and one returning the absolute span they came from. The bounds
+    guard was originally on ``invert`` alone, and the tilesets that work in
+    absolute coordinates -- beddb, bed2ddb and the bigInteract pair -- call
+    only the other one.
+    """
+
+    @pytest.mark.parametrize("x", [10, 9999, -1])
+    def test_tile_span_should_raise_when_the_position_is_off_the_canvas(
+        self, x
+    ):
+        """Test that the sibling accessor carries the same bound.
+
+        Given:
+            A tile position outside the canvas at this zoom.
+        When:
+            Its absolute span is requested.
+        Then:
+            It should raise ``TileOutOfBounds``. Unchecked, the arithmetic
+            returns a well-formed span far past the genome, which queries zero
+            rows and serves an empty tile a client cannot tell apart from "no
+            annotations in this region".
+        """
+        # Arrange
+        canvas = TileCanvas(**CANVAS, chromsizes=CHROMSIZES)
+
+        # Act & assert
+        with pytest.raises(TileOutOfBounds, match=f"position {x}"):
+            canvas.tile_span(x)
+
+    def test_tile_span_should_return_the_span_for_a_position_in_range(self):
+        """Test the ordinary case, so the guard cannot pass by rejecting all.
+
+        Given:
+            The last tile that exists at this zoom.
+        When:
+            Its absolute span is requested.
+        Then:
+            It should return the span, including the part reaching past the
+            end of the genome -- the canvas extends further than the genome by
+            construction, and only positions past the *canvas* are rejected.
+        """
+        # Arrange
+        canvas = TileCanvas(**CANVAS, chromsizes=CHROMSIZES)
+
+        # Act
+        span = canvas.tile_span(canvas.n_tiles - 1)
+
+        # Assert
+        assert span == (360, 400)
+
+    def test_invert_should_raise_at_the_call_rather_than_on_iteration(self):
+        """Test that validation is eager, which callers depend on.
+
+        Given:
+            A position off the end of the canvas.
+        When:
+            ``invert`` is called and its result never iterated.
+        Then:
+            It should raise anyway. ``invert`` is an ordinary function
+            returning a generator, not a generator function, and the cooler
+            batching screen calls it purely for that side effect -- a ``yield``
+            added to the body would defer the raise and silently disarm the
+            screen, with nothing to distinguish the two.
+        """
+        # Arrange
+        canvas = TileCanvas(**CANVAS, chromsizes=CHROMSIZES)
+
+        # Act & assert
+        with pytest.raises(TileOutOfBounds):
+            canvas.invert(9999)
+
+    def test___init___should_raise_when_the_binsize_is_not_a_number(self):
+        """Test the degenerate binsize the ordering comparison lets through.
+
+        Given:
+            A canvas constructed with a binsize of NaN.
+        When:
+            It is constructed.
+        Then:
+            It should raise ``ValueError``. ``binsize`` is a float and
+            ``nan <= 0`` is False, so the straightforward spelling of the
+            guard admits NaN and lets it surface from ``n_bins`` instead --
+            one step removed from the argument that was actually wrong, which
+            is the failure the guard exists to prevent.
+        """
+        # Act & assert
+        with pytest.raises(ValueError, match="binsize must be positive"):
+            TileCanvas(z=0, binsize=math.nan, tile_size=4, max_width=400)

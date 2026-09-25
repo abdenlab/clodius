@@ -7,13 +7,19 @@ have that collapse into the opposite. ``TilesetInfo`` caches derivations off
 its fields, which is only sound while the fields cannot move.
 """
 
+from collections.abc import Hashable
+
 import pytest
 from pydantic import ValidationError
 
 from clodius.core.coords import Chromsizes
-from clodius.core.errors import MalformedTileId, UnsupportedOption
+from clodius.core.errors import (
+    TileOutOfBounds,
+    TilesetUnavailable,
+    UnsupportedOption,
+)
 from clodius.core.tileid import ModifierSpec
-from clodius.core.tileset import BaseTileset, TilesetInfo
+from clodius.core.tileset import BaseTileset, DatasetInfo, TilesetInfo
 
 CHROMSIZES = Chromsizes.from_pairs([("c1", 100), ("c2", 200)])
 
@@ -40,6 +46,28 @@ class MatrixTileset(BaseTileset):
 
 class UndeclaredTileset(BaseTileset):
     """A tileset that forgets to declare its arity, as BaseTileset does."""
+
+
+class ServingTileset(BaseTileset):
+    """A 1D tileset whose tile payload is just its own position.
+
+    ``refuse`` names positions that raise a ``TileError``; ``explode`` makes
+    every position raise something that is not one.
+    """
+
+    ndim = 1
+    datatype = "bedlike"
+
+    def __init__(self, refuse=frozenset(), explode=False):
+        self._refuse = refuse
+        self._explode = explode
+
+    def _tile(self, tid):
+        if self._explode:
+            raise OSError("the file is gone")
+        if tid.pos[0] in self._refuse:
+            raise TileOutOfBounds(f"tile position {tid.pos[0]} refused")
+        return [tid.pos[0]]
 
 
 class TestBaseTileset:
@@ -178,17 +206,18 @@ class TestBaseTileset:
         When:
             a tile id is parsed against it.
         Then:
-            It should raise ``MalformedTileId``, not ``AttributeError``. The
-            distinction is the whole point: only a ``TilesetError`` can be
-            rendered at the server boundary, and anything else escapes as a
-            500 -- the same failure the parser's own arity guard exists to
-            prevent, one level up.
+            It should raise ``TilesetUnavailable``, not ``AttributeError``.
+            Only a ``TilesetError`` can be rendered at the server boundary and
+            anything else escapes as a 500; and the arity is the tileset's own
+            declaration rather than part of the request, so ``MalformedTileId``
+            would blame the client for a fault it cannot fix and invite it to
+            retry a well-formed id forever.
         """
         # Arrange
         tileset = UndeclaredTileset()
 
         # Act & assert
-        with pytest.raises(MalformedTileId, match="arity"):
+        with pytest.raises(TilesetUnavailable, match="ndim"):
             tileset.parse_tile_id("abc.3.4")
 
 
@@ -274,3 +303,198 @@ class TestTilesetInfo:
         # Act & assert
         with pytest.raises(ValidationError):
             padded.tile_size = 999
+
+
+class TestBaseTilesetTiles:
+    """The per-tile error boundary, which lives here and not in ten copies.
+
+    ``clodius.core.errors`` states it as a library-wide contract: a
+    ``TileError`` is caught, converted to a dict, and returned as that tile's
+    payload, leaving the other responses intact. Anything else is a
+    whole-request failure and propagates.
+    """
+
+    def test_tiles_should_return_one_entry_per_requested_id(self):
+        """Test the shape the protocol requires of every tileset.
+
+        Given:
+            A tileset over three tile ids, none of which refuse.
+        When:
+            They are served.
+        Then:
+            It should return one pair per id, carrying the id alongside its
+            payload. The client matches responses to requests by raw tile id
+            string, so a dropped entry is an unanswerable request.
+        """
+        # Arrange
+        tileset = ServingTileset()
+        ids = [tileset.parse_tile_id(f"abc.0.{x}") for x in (0, 1, 2)]
+
+        # Act
+        served = tileset.tiles(ids)
+
+        # Assert
+        assert [tid.pos[0] for tid, _ in served] == [0, 1, 2]
+        assert [payload for _, payload in served] == [[0], [1], [2]]
+
+    def test_tiles_should_return_a_refusal_as_that_tiles_payload(self):
+        """Test that one refusal does not take the batch down with it.
+
+        Given:
+            A batch in which one tile raises ``TileOutOfBounds`` and the rest
+            serve normally.
+        When:
+            The batch is served.
+        Then:
+            It should return an error payload in the refusing tile's slot and
+            ordinary payloads in the others. Letting the exception escape would
+            answer a batch of sixteen with a single failure, for a condition
+            that is about one tile.
+        """
+        # Arrange
+        tileset = ServingTileset(refuse={1})
+        ids = [tileset.parse_tile_id(f"abc.0.{x}") for x in (0, 1, 2)]
+
+        # Act
+        served = tileset.tiles(ids)
+
+        # Assert
+        assert served[0][1] == [0] and served[2][1] == [2]
+        assert served[1][1]["error"]
+
+    def test_tiles_should_raise_when_the_failure_is_not_per_tile(self):
+        """Test that the catch stays narrow.
+
+        Given:
+            A tileset whose ``_tile`` raises something that is not a
+            ``TileError`` -- the shape an unreadable file takes.
+        When:
+            A batch is served.
+        Then:
+            It should propagate. Answering sixteen tiles with sixteen cheerful
+            error payloads and a 200 would be a lie when the honest answer is
+            that the dataset cannot be served at all.
+        """
+        # Arrange
+        tileset = ServingTileset(explode=True)
+        ids = [tileset.parse_tile_id("abc.0.0")]
+
+        # Act & assert
+        with pytest.raises(OSError):
+            tileset.tiles(ids)
+
+
+class TestDatasetInfo:
+    """The base half of the info pair, and the promise it has to share."""
+
+    def test___setattr___should_raise_when_a_field_is_assigned(self):
+        """Test that the base makes the same immutability promise as the
+        subclass.
+
+        Given:
+            A dataset info, the type ``Dataset.info()`` is annotated with.
+        When:
+            One of its fields is assigned.
+        Then:
+            It should raise. Both types are public and the subclass is frozen,
+            so a base that accepted assignment would let code written against
+            the published contract type-check and then fail only on a
+            ``TilesetInfo`` -- which is exactly how the multivec row-metadata
+            assignment survived review.
+        """
+        # Arrange
+        info = DatasetInfo(min_pos=[0], max_pos=[100])
+
+        # Act & assert
+        with pytest.raises(ValidationError):
+            info.max_pos = [200]
+
+    def test_with__should_return_a_copy_carrying_the_changes(self):
+        """Test the published way to derive a variant of a frozen info.
+
+        Given:
+            A dataset info and a field to change.
+        When:
+            ``with_`` is called.
+        Then:
+            It should return a new info carrying the change, leaving the
+            original untouched.
+        """
+        # Arrange
+        info = DatasetInfo(min_pos=[0], max_pos=[100])
+
+        # Act
+        derived = info.with_(max_pos=[200])
+
+        # Assert
+        assert derived.max_pos == [200]
+        assert info.max_pos == [100]
+
+    def test_with__should_raise_when_the_change_is_invalid(self):
+        """Test the validation ``model_copy`` skips.
+
+        Given:
+            A value the constructor rejects.
+        When:
+            ``with_`` is called with it.
+        Then:
+            It should raise. ``model_copy(update=...)`` accepts it silently, so
+            a derive path built on that would serve a value the type promises
+            cannot exist.
+        """
+        # Arrange
+        info = DatasetInfo(min_pos=[0], max_pos=[100])
+
+        # Act & assert
+        with pytest.raises(ValidationError):
+            info.with_(max_width=-1)
+
+
+class TestTilesetInfoDerivation:
+    """Deriving a variant of an info that caches off its own fields."""
+
+    def test_with__should_rebuild_the_cached_coordinate_system(self):
+        """Test that a derived info does not keep the old coordinate system.
+
+        Given:
+            An info whose ``coordinate_system`` has already been computed, and
+            a replacement set of chromsizes in a different order.
+        When:
+            ``with_`` is called with the new chromsizes.
+        Then:
+            It should serve canvases built from the new ordering.
+            ``model_copy`` carries the cache across untouched, so the copy
+            reports the new chromsizes through ``to_dict`` while placing every
+            record by the old ones -- a wrong answer indistinguishable from a
+            right one.
+        """
+        # Arrange
+        info = TilesetInfo.quadtree(CHROMSIZES, 256)
+        assert info.coordinate_system.names == ("c1", "c2")
+        reversed_pairs = Chromsizes.from_pairs(
+            [("c2", 200), ("c1", 100)]
+        ).to_pairs()
+
+        # Act
+        derived = info.with_(chromsizes=reversed_pairs)
+
+        # Assert
+        assert derived.coordinate_system.names == ("c2", "c1")
+
+    def test___hash___should_not_be_advertised(self):
+        """Test that the type does not claim a capability no instance has.
+
+        Given:
+            A tileset info, whose ``min_pos``/``max_pos`` are lists.
+        When:
+            It is tested for hashability.
+        Then:
+            It should report unhashable. Pydantic synthesizes a hash for every
+            frozen model, which would otherwise make ``isinstance(info,
+            Hashable)`` true while ``hash(info)`` raised.
+        """
+        # Arrange
+        info = TilesetInfo.quadtree(CHROMSIZES, 256)
+
+        # Act & assert
+        assert not isinstance(info, Hashable)
