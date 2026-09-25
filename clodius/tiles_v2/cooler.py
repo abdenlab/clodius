@@ -11,7 +11,7 @@ from cooler.util import open_hdf5
 
 from clodius.core.coords import Chromsizes, GenomicRange
 from clodius.core.errors import TileError
-from clodius.core.tile import DenseTile, DenseTilePayload
+from clodius.core.tile import DenseTile, TileKind
 from clodius.core.policies import (
     TilePolicy,
     reconcile_2d,
@@ -440,7 +440,12 @@ class CoolerTileset(BaseTileset):
             self._info = self._build_info()
         return self._info
 
-    def tiles(self, ids, options=None) -> list[tuple[TileId, DenseTilePayload]]:
+    def tiles(self, ids, options=None) -> list[tuple[TileId, TileKind]]:
+        """One entry per requested id; a refusal rides in the payload slot.
+
+        Overrides `BaseTileset.tiles` because tiles are batched per zoom
+        level and transform, and `_tile` reads through a shared reader.
+        """
         # Batched per zoom level and transform, since those decide which cooler
         # and which weights a tile is read from.
         ids = list(ids)

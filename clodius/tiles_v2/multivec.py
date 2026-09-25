@@ -10,7 +10,7 @@ import numpy as np
 
 from clodius.core.coords import Chromsizes, GenomicRange
 from clodius.core.errors import MalformedTileId, TileError
-from clodius.core.tile import DenseTile, DenseTilePayload
+from clodius.core.tile import DenseTile, DenseTilePayload, TileKind
 from clodius.core.policies import TilePolicy, reconcile
 from clodius.core.tileid import TileId
 from clodius.core.tileset import BaseTileset, TilesetInfo
@@ -112,10 +112,14 @@ class MultivecTileset(BaseTileset):
             self._info = self._build_info()
         return self._info
 
-    def tiles(self, ids, options=None) -> list[tuple[TileId, DenseTilePayload]]:
+    def tiles(self, ids, options=None) -> list[tuple[TileId, TileKind]]:
+        """One entry per requested id; a refusal rides in the payload slot.
+
+        Overrides `BaseTileset.tiles` because `_tile` takes a batch-wide
+        aggregation alongside the tile id.
+        """
         # Parsed once, not per tile: it is one setting for the whole batch, and
         # a bad one should fail the request rather than fifteen tiles over.
-        """One entry per requested id; a refusal rides in the payload slot."""
         aggregation = parse_row_aggregation(options, self.info().shape[1])
         out = []
         for tid in ids:
