@@ -87,6 +87,18 @@ def make_indexed_bedpe(tmp_path):
     return build
 
 
+#: A single contig, so a zoom-3 tile spans 128 bp and anchors can be placed
+#: in known tiles by hand. At tile 1, [128, 256): ``near`` has both anchors
+#: inside, ``straddle`` one, ``spanner`` neither but a hull that crosses.
+POLICY_CHROMSIZES = Chromsizes.from_pairs([("c1", 1000)])
+
+POLICY_RECORDS = [
+    ("c1", 10, 20, "c1", 180, 190, "straddle"),
+    ("c1", 10, 20, "c1", 300, 310, "spanner"),
+    ("c1", 140, 150, "c1", 200, 210, "near"),
+]
+
+
 def names(records):
     """The trailing label column of each served record."""
     return [r["fields"][6] for r in records]
@@ -282,6 +294,46 @@ class TestBedpeLinksTileset:
 
         # Assert
         assert records == []
+
+    @pytest.mark.parametrize(
+        "policy,expected",
+        [
+            (LinkPolicy.BOTH, ["near"]),
+            (LinkPolicy.EITHER, ["near", "straddle"]),
+            (LinkPolicy.HULL, ["near", "spanner", "straddle"]),
+        ],
+        ids=["both", "either", "hull"],
+    )
+    def test_tiles_should_select_the_links_the_policy_asks_for(
+        self, make_bedpe, policy, expected
+    ):
+        """Test the three link policies against a tile that separates them.
+
+        Given:
+            A BEDPE holding one pair with both anchors in the tile, one with a
+            single anchor in it, and one with neither but a hull that crosses
+            it, served under each policy.
+        When:
+            That tile is served.
+        Then:
+            Each policy should return a different set. The three differ only
+            in which anchors have to be in view, so a tile where all three
+            agree -- which is most tiles -- cannot tell them apart, and only
+            ``BOTH`` had any coverage before.
+        """
+        # Arrange
+        tileset = BedpeLinksTileset(
+            make_bedpe(POLICY_RECORDS, name="policies.bedpe"),
+            POLICY_CHROMSIZES,
+            link_policy=policy,
+            tile_size=TILE_SIZE,
+        )
+
+        # Act
+        (_, payload), = tileset.tiles([tileset.parse_tile_id("u.3.1")])
+
+        # Assert
+        assert sorted(names(payload)) == expected
 
     def test_tiles_should_serve_an_indexed_file_missing_a_contig(
         self, make_bedpe, make_indexed_bedpe

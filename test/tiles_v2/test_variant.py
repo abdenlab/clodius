@@ -25,6 +25,7 @@ import pysam
 import pytest
 
 from clodius.core.coords import Chromsizes
+from clodius.core.errors import TilesetUnavailable
 from clodius.core.policies import TilePolicy
 from clodius.tiles_v2.variant import VcfTileset, to_bedlike
 
@@ -174,6 +175,57 @@ class TestVariantTileset:
         # Assert
         assert "z" not in names(records)
         assert records
+
+    def test_info_should_advertise_and_enforce_the_span_limit(self, make_vcf):
+        """Test that the span ceiling is both published and applied.
+
+        Given:
+            A tileset under a policy limiting a tile's span.
+        When:
+            Its info is read and a tile wider than the limit is served.
+        Then:
+            The info should carry the limit as ``max_tile_width`` and the tile
+            should come back as a ``TileTooWide`` payload. Advertising without
+            enforcing invites a client to keep asking; enforcing without
+            advertising gives it no way to stop.
+        """
+        # Arrange
+        tileset = VcfTileset(
+            make_vcf(), chromsizes=CHROMSIZES, policy=TilePolicy(max_span=100)
+        )
+
+        # Act
+        info = tileset.info()
+        (_, payload), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+        # Assert
+        assert info.to_dict()["max_tile_width"] == 100
+        assert payload["error_type"] == "TileTooWide"
+
+    def test_tiles_should_refuse_to_scan_an_unindexed_file_above_the_ceiling(
+        self, make_vcf
+    ):
+        """Test the scan ceiling on the path that has to read the whole file.
+
+        Given:
+            A plain VCF larger than the policy's scan ceiling.
+        When:
+            A tile is served.
+        Then:
+            It should raise ``TilesetUnavailable`` rather than scan. Not a
+            ``TileError``: an unindexed file above the ceiling is no more
+            servable for the next tile than for this one.
+        """
+        # Arrange
+        tileset = VcfTileset(
+            make_vcf(),
+            chromsizes=CHROMSIZES,
+            policy=TilePolicy(max_scan_bytes=10),
+        )
+
+        # Act & assert
+        with pytest.raises(TilesetUnavailable):
+            tileset.tiles([tileset.parse_tile_id("u.0.0")])
 
     def test_tiles_should_serve_an_indexed_file_missing_a_contig(
         self, make_vcf, make_indexed_vcf

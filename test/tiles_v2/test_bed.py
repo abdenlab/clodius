@@ -27,6 +27,7 @@ import pysam
 import pytest
 
 from clodius.core.coords import Chromsizes
+from clodius.core.errors import TilesetUnavailable
 from clodius.core.policies import TilePolicy
 from clodius.tiles_v2.bed import BedTileset, to_tile_record
 
@@ -301,6 +302,61 @@ def test_regions_should_skip_a_record_on_an_unknown_contig(make_bed):
     # Assert
     assert len(rows) == len(RECORDS)
     assert all(r["fields"][0] != "cUNKNOWN" for r in rows)
+
+
+def test_tiles_should_refuse_to_scan_an_unindexed_file_above_the_ceiling(
+    make_bed,
+):
+    """Test the scan ceiling, which only an unindexed file can reach.
+
+    Given:
+        A plain BED larger than the policy's scan ceiling.
+    When:
+        A tile is served.
+    Then:
+        It should raise ``TilesetUnavailable``. Every tile re-reads an
+        unindexed file end to end, which is the cost the ceiling exists to
+        refuse -- and the class is deliberately not a ``TileError``, because
+        the file is no more servable for the next tile than for this one.
+    """
+    # Arrange
+    path = make_bed(RECORDS, name="big.bed")
+    tileset = BedTileset(
+        path, CHROMSIZES, policy=TilePolicy(max_scan_bytes=10)
+    )
+
+    # Act & assert
+    with pytest.raises(TilesetUnavailable):
+        tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+
+def test_tiles_should_serve_an_indexed_file_above_the_scan_ceiling(
+    make_bed_bgzf,
+):
+    """Test the control that keeps the ceiling off the seek path.
+
+    Given:
+        The same records BGZF-compressed and tabix-indexed, under the same
+        ceiling.
+    When:
+        A tile is served.
+    Then:
+        It should serve the records. An indexed file reads only its own byte
+        ranges, so its size is not the cost the ceiling is guarding against --
+        and without this the refusal above would pass for a build that
+        refused everything.
+    """
+    # Arrange
+    path = make_bed_bgzf(RECORDS, name="bigidx.bed")
+    tileset = BedTileset(
+        path, CHROMSIZES, policy=TilePolicy(max_scan_bytes=10)
+    )
+
+    # Act
+    (_, records), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+    # Assert
+    assert len(records) == len(RECORDS)
 
 
 def test_tiles_should_serve_an_indexed_file_missing_a_contig(
