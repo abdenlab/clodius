@@ -15,6 +15,8 @@ from clodius.core.errors import (
     MalformedTileId,
     TilesetError,
     TilesetUnavailable,
+    UnsupportedModifier,
+    UnsupportedOption,
 )
 from clodius.core.tileid import ModifierSpec, TileId
 
@@ -119,6 +121,12 @@ def test_parse_should_not_raise_a_client_error_when_the_arity_is_invalid(ndim):
         ("abc.3.4", 0),
         ("abc.3", 1),
         ("abc.3.x", 1),
+        # These three have no dedicated test of their own. Without them every
+        # row above duplicates one, and this test cannot fail unless a more
+        # specific one fails first.
+        ("abc.3.4.mean", 1),
+        ("abc.3.4.a.b", 1),
+        ("abc.3.4,bogus", 1),
     ],
 )
 def test_parse_should_raise_a_tileset_error_for_any_rejection(tile_id, ndim):
@@ -131,16 +139,26 @@ def test_parse_should_raise_a_tileset_error_for_any_rejection(tile_id, ndim):
     Then:
         It should raise a ``TilesetError`` subclass, which is the only thing
         the server catches. This is the invariant the individual guards are
-        instances of, asserted once over all of them -- so no row here is the
-        sole coverage of any rejection, and trimming one loses nothing but
-        this restatement.
+        instances of, asserted once over all of them. The last three rows are
+        the only coverage of their rejection; the rest restate a dedicated
+        test and are kept so the invariant is asserted over the whole set.
     """
     # Act & assert
     with pytest.raises(TilesetError):
         TileId.parse(tile_id, ndim=ndim)
 
 
-def test_parse_should_raise_when_a_coordinate_is_not_ascii_decimal():
+@pytest.mark.parametrize(
+    "tile_id",
+    [
+        "abc.3.+5",
+        "abc.3.1_0",
+        "abc.+3.5",
+        "abc.3.\u00b2",
+        "abc.3.\uff11",
+    ],
+)
+def test_parse_should_raise_when_a_coordinate_is_not_ascii_decimal(tile_id):
     """Test the spellings a bare int conversion would accept.
 
     Given:
@@ -157,15 +175,151 @@ def test_parse_should_raise_when_a_coordinate_is_not_ascii_decimal():
         not a ``TilesetError``, so it escapes the boundary as a 500.
     """
     # Act & assert
-    for tile_id in (
-        "abc.3.+5",
-        "abc.3.1_0",
-        "abc.+3.5",
-        "abc.3.\u00b2",
-        "abc.3.\uff11",
-    ):
-        with pytest.raises(MalformedTileId):
-            TileId.parse(tile_id, ndim=1)
+    with pytest.raises(MalformedTileId):
+        TileId.parse(tile_id, ndim=1)
+
+
+def test_parse_should_raise_when_the_modifier_is_not_declared():
+    """Test a modifier the tileset's spec does not list.
+
+    Given:
+        A spec accepting ``mean`` and ``sum``, and an id carrying ``avg``.
+    When:
+        It is parsed.
+    Then:
+        It should raise ``UnsupportedModifier`` naming what it does accept.
+        The class is the contract: it is a ``MalformedTileId``, and so a
+        sibling of ``TileError``, which means the request is refused outright
+        rather than served as one tile carrying an error.
+    """
+    # Arrange
+    spec = ModifierSpec(values=frozenset({"mean", "sum"}))
+
+    # Act & assert
+    with pytest.raises(UnsupportedModifier, match="mean"):
+        TileId.parse("abc.3.4.avg", ndim=1, modifiers=spec)
+
+
+def test_parse_should_raise_when_the_tileset_declares_no_modifiers():
+    """Test a modifier against a tileset that accepts none at all.
+
+    Given:
+        A tileset declaring no modifier spec, and an id carrying one.
+    When:
+        It is parsed.
+    Then:
+        It should raise ``UnsupportedModifier``. A distinct cause from a spec
+        that merely excludes the value, and a distinct branch: without it the
+        trailing part is read as a coordinate the tileset never declared.
+    """
+    # Act & assert
+    with pytest.raises(UnsupportedModifier):
+        TileId.parse("abc.3.4.mean", ndim=1, modifiers=None)
+
+
+def test_parse_should_raise_when_an_open_modifier_slot_is_empty():
+    """Test the sentinel an ``allow_unknown`` spec must still refuse.
+
+    Given:
+        A spec that accepts unlisted values -- cooler's shape, where the
+        modifier is a column name validated at fetch time -- and an id whose
+        modifier slot is empty.
+    When:
+        It is parsed.
+    Then:
+        It should raise ``UnsupportedModifier``. Without this branch the empty
+        string is accepted and the tileset looks up a column named ``""``
+        much later, where the failure is no longer a tile-id problem.
+    """
+    # Arrange
+    spec = ModifierSpec(values=frozenset({"default"}), allow_unknown=True)
+
+    # Act & assert
+    with pytest.raises(UnsupportedModifier, match="empty"):
+        TileId.parse("abc.3.4.", ndim=1, modifiers=spec)
+
+
+def test_parse_should_raise_when_an_option_is_not_key_value():
+    """Test an option chunk that is not a pair at all.
+
+    Given:
+        An id whose option chunk carries no colon.
+    When:
+        It is parsed.
+    Then:
+        It should raise ``MalformedTileId`` and not ``UnsupportedOption``:
+        the fault is the syntax, not an unrecognized key, and nothing else
+        distinguishes the two.
+    """
+    # Act & assert
+    with pytest.raises(MalformedTileId) as excinfo:
+        TileId.parse("abc.3.4,bogus", ndim=1)
+    assert not isinstance(excinfo.value, UnsupportedOption)
+
+
+def test_parse_should_raise_when_a_second_part_trails_the_modifier():
+    """Test an id with more trailing parts than the modifier slot holds.
+
+    Given:
+        A 1D id carrying two parts after its position.
+    When:
+        It is parsed.
+    Then:
+        It should raise ``MalformedTileId``. Only one trailing part is legal;
+        without the length check a second is silently discarded and the client
+        is served a tile it did not ask for.
+    """
+    # Act & assert
+    with pytest.raises(MalformedTileId):
+        TileId.parse("abc.3.4.a.b", ndim=1)
+
+
+def test_parse_should_accept_the_zeroth_zoom_and_position():
+    """Test the boundary the two negative guards sit on.
+
+    Given:
+        An id naming zoom zero and position zero.
+    When:
+        It is parsed.
+    Then:
+        It should parse. Every other success case here uses a non-zero zoom,
+        so writing either guard as ``<= 0`` rather than ``< 0`` would pass the
+        whole suite while refusing the top tile of every tileset -- the one a
+        client asks for first.
+    """
+    # Act
+    tid = TileId.parse("abc.0.0", ndim=1)
+
+    # Assert
+    assert (tid.z, tid.pos) == (0, (0,))
+
+
+@pytest.mark.parametrize(
+    "tile_id,expected",
+    [("abc.-0.0", (0, (0,))), ("abc.00.007", (0, (7,))), ("abc.0.7", (0, (7,)))],
+)
+def test_parse_should_read_an_unnormalized_id_as_the_tile_it_names(
+    tile_id, expected
+):
+    """Test the spellings that denote a tile without being its canonical id.
+
+    Given:
+        Ids carrying a negative zero or leading zeros.
+    When:
+        They are parsed.
+    Then:
+        Each should give the tile its digits name -- ``abc.-0.0`` is tile 0
+        and ``abc.00.007`` is tile 7, the same tile as ``abc.0.7``. The answer
+        is correct either way because ``raw`` is echoed back verbatim; only
+        the cache key duplicates. Pinned because ``_is_int`` admits ``-0``
+        while the guard below rejects anything negative, and tightening
+        either one starts refusing tile 0.
+    """
+    # Act
+    tid = TileId.parse(tile_id, ndim=1)
+
+    # Assert
+    assert (tid.z, tid.pos) == expected
 
 
 def test_parse_should_raise_when_there_are_too_few_positions():
