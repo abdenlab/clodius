@@ -11,6 +11,12 @@ from clodius.core.errors import (
     UnsupportedOption,
 )
 from clodius.core.policies import TilePolicy
+from clodius.core.tile import (
+    Annotation2DRecord,
+    AnnotationRecord,
+    ErrorTilePayload,
+    TileKind,
+)
 from clodius.core.tileid import ModifierSpec, TileId
 from clodius.core.tileset import (
     BaseTileset,
@@ -24,25 +30,29 @@ from clodius.core.tileset import (
 )
 
 __all__ = [
+    "Annotation2DRecord",
+    "AnnotationRecord",
     "BaseTileset",
-    "Canvas",
     "Chromsizes",
     "Dataset",
     "DatasetInfo",
+    "ErrorTilePayload",
     "GenomicRange",
     "Ladder",
-    "ProvidesChromsizes",
-    "ProvidesRegions",
     "MalformedTileId",
     "ModifierSpec",
+    "ProvidesChromsizes",
+    "ProvidesRegions",
+    "TileCanvas",
     "TileError",
-    "TilesetError",
     "TileId",
+    "TileKind",
     "TileOutOfBounds",
     "TilePolicy",
     "TileTooLarge",
     "TileTooWide",
     "Tileset",
+    "TilesetError",
     "TilesetInfo",
     "TilesetUnavailable",
     "UnsupportedModifier",
