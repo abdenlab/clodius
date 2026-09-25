@@ -27,6 +27,19 @@ class TilePolicy:
     # Refuse to scan an unindexed file larger than this.
     max_scan_bytes: int = 20_000_000
 
+    def __post_init__(self) -> None:
+        # Validated here rather than at the four capping sites. `TilePolicy` is
+        # re-exported from `clodius.core` and constructed directly by every
+        # caller, so this is the only place all of them pass through. A
+        # negative `max_records` is the dangerous one: `take_most_important`
+        # and `gxf` read it as "serve nothing", while polars' `top_k` raises
+        # `OverflowError` -- not a `TilesetError`, so it escapes the per-tile
+        # boundary and takes the whole batch. One rule, one encoding.
+        for name in ("max_span", "max_records", "max_scan_bytes"):
+            value = getattr(self, name)
+            if value is not None and value < 0:
+                raise ValueError(f"{name} must not be negative, got {value}")
+
     def with_(self, **changes) -> TilePolicy:
         """Return a copy with ``changes`` applied."""
         return replace(self, **changes)

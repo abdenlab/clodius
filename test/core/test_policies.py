@@ -15,7 +15,11 @@ import hashlib
 
 import pytest
 
-from clodius.core.policies import stable_importance, take_most_important
+from clodius.core.policies import (
+    TilePolicy,
+    stable_importance,
+    take_most_important,
+)
 
 #: Importance values as this implementation produces them today, recorded so
 #: that a change of digest, encoding, slice or divisor has to be deliberate.
@@ -32,6 +36,71 @@ GOLDEN = {
 def identity(x):
     """Rank a record by its own value."""
     return x
+
+
+class TestTilePolicy:
+    """The limits themselves, validated where all four capping sites pass."""
+
+    @pytest.mark.parametrize(
+        "field", ["max_span", "max_records", "max_scan_bytes"]
+    )
+    def test___init___should_raise_when_a_limit_is_negative(self, field):
+        """Test the guard covering every site that reads a limit.
+
+        Given:
+            A policy constructed with one limit set negative.
+        When:
+            It is constructed.
+        Then:
+            It should raise ``ValueError``. A negative ``max_records`` meant
+            four different things at the four capping sites, and one of them
+            -- polars' ``top_k`` -- raised ``OverflowError``, which is not a
+            ``TilesetError`` and so escaped the per-tile boundary and failed
+            the whole batch.
+        """
+        # Act & assert
+        with pytest.raises(ValueError, match=field):
+            TilePolicy(**{field: -1})
+
+    @pytest.mark.parametrize(
+        "field", ["max_span", "max_records", "max_scan_bytes"]
+    )
+    def test___init___should_accept_a_limit_of_zero(self, field):
+        """Test that the guard rejects negatives without rejecting zero.
+
+        Given:
+            A policy constructed with one limit set to zero.
+        When:
+            It is constructed.
+        Then:
+            It should succeed. Zero is a meaningful setting -- "serve nothing"
+            -- and rejecting it would break the very configuration the cap
+            exists to honour.
+        """
+        # Act
+        policy = TilePolicy(**{field: 0})
+
+        # Assert
+        assert getattr(policy, field) == 0
+
+    def test_with__should_raise_when_the_change_is_negative(self):
+        """Test that deriving a policy re-validates rather than bypassing.
+
+        Given:
+            A valid policy.
+        When:
+            A copy is derived with a negative cap.
+        Then:
+            It should raise ``ValueError``. ``dataclasses.replace`` runs
+            ``__init__``, so the guard is inherited rather than restated --
+            but only a test says so.
+        """
+        # Arrange
+        policy = TilePolicy()
+
+        # Act & assert
+        with pytest.raises(ValueError, match="max_records"):
+            policy.with_(max_records=-1)
 
 
 def test_take_most_important_should_return_everything_when_under_the_cap():
