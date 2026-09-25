@@ -204,8 +204,15 @@ class BedTileset(BaseTileset):
         # Reads ``limit + 1`` rows to answer "is there a next page" without a
         # count. ``n_rows`` pushes down into the reader, so this touches only the
         # head of the file rather than parsing all of it as legacy does.
+        # Filtered before the slice, not after. `offset`, `limit` and the
+        # probe all have to range over the same population: filtering
+        # afterwards lets one unplaceable row consume the probe -- `has_next`
+        # goes False with records still unread -- and leaves `offset` indexing
+        # raw file rows while the page is a filtered subset, so consecutive
+        # pages overlap.
         frame = (
             self._scan()
+            .filter(self._known_chroms)
             .slice(offset, limit + 1)
             .with_columns(_digest=self._digest_expr())
             .collect(engine="streaming")
