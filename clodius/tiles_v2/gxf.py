@@ -492,11 +492,6 @@ class GxfTileset(BaseTileset):
     def info(self) -> TilesetInfo:
         return self._info
 
-    def tiles(
-        self, ids: Sequence[TileId], options=None
-    ) -> list[tuple[TileId, list[AnnotationRecord]]]:
-        return [(tid, self._tile(tid)) for tid in ids]
-
     def close(self) -> None:
         pass
 
@@ -565,47 +560,37 @@ class GxfTileset(BaseTileset):
             frame = self._source(None).pl(lazy=True).filter(_overlaps(ranges))
         return frame.collect(engine="streaming").to_dicts()
 
-    def _thin(self, rows: list[dict]) -> list[dict]:
+    def _thin(self, genes: dict[str, Gene]) -> dict[str, Gene]:
         """Cap by gene, keeping every child of the genes kept.
 
         Row-level thinning would sever exons from their transcripts and produce
         a gene missing pieces. Selection is by span length -- the same measure
         emitted as ``importance`` -- so the genes that survive the cap are the
         ones the client would have ranked highest anyway, at every zoom and
-        across requests.
+        across requests. The id breaks a tie, for the same reason.
+
+        Applied to the linked genes rather than to the flat rows, so the cap
+        ranges over exactly the objects `_records` turns into records. Counting
+        rows instead counted only features whose id the dialect could read,
+        while `build_genes` synthesizes an id for the rest and emits them as
+        genes anyway -- so a GFF3 whose gene rows carry no ``ID=``, which is
+        legal, served every gene at any positive cap. Thinning after the link
+        step makes the two agree by construction rather than by keeping two id
+        derivations in step.
         """
         cap = self.policy.max_records
-        if cap is None:
-            return rows
+        if cap is None or len(genes) <= cap:
+            return genes
+        if cap <= 0:
+            return {}
 
-        spans: dict[str, int] = {}
-        for row in rows:
-            attrs = row.get("attributes") or {}
-            if row["type"] in GENE_TYPES or row["type"] in PSEUDOGENE_TYPES:
-                fid, _ = self._dialect.identity(row["type"], attrs)
-                if fid:
-                    spans[fid] = row["end"] - row["start"]
-        if len(spans) <= cap:
-            return rows
-
-        ranked = sorted(spans, key=lambda fid: (spans[fid], fid), reverse=True)
+        ranked = sorted(
+            genes,
+            key=lambda fid: (genes[fid].row["end"] - genes[fid].row["start"], fid),
+            reverse=True,
+        )
         keep = set(ranked[:cap])
-        # A row survives if it belongs to a kept gene, directly or through its
-        # transcript. Resolved by walking gene -> transcript -> child.
-        kept_tx = set()
-        for row in rows:
-            attrs = row.get("attributes") or {}
-            fid, parent = self._dialect.identity(row["type"], attrs)
-            if row["type"] in TRANSCRIPT_TYPES and parent in keep and fid:
-                kept_tx.add(fid)
-
-        out = []
-        for row in rows:
-            attrs = row.get("attributes") or {}
-            fid, parent = self._dialect.identity(row["type"], attrs)
-            if fid in keep or parent in keep or parent in kept_tx:
-                out.append(row)
-        return out
+        return {fid: gene for fid, gene in genes.items() if fid in keep}
 
     def _records(
         self, genes: dict[str, Gene], offsets: dict[str, int]
@@ -618,9 +603,16 @@ class GxfTileset(BaseTileset):
         return to_gene_records(genes, offsets)
 
     def _tile(self, tid: TileId) -> list[AnnotationRecord]:
+        # Before the read, not after it. `_thin` refuses a non-positive cap
+        # too, but by then the tile has been scanned and linked into genes --
+        # seconds of work on a zoom-0 tile, to serve an empty list.
+        cap = self.policy.max_records
+        if cap is not None and cap <= 0:
+            return []
+
         ranges = list(self._info.canvas(tid.z).invert(tid.pos[0]))
         rows = self._rows(ranges)
-        genes = build_genes(self._thin(rows), self._dialect)
+        genes = self._thin(build_genes(rows, self._dialect))
         return self._records(genes, self._chromsizes.offsets)
 
 

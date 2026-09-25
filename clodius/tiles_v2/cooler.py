@@ -10,8 +10,8 @@ from cooler.core import CSRReader, DirectRangeQuery2D, FillLowerRangeQuery2D
 from cooler.util import open_hdf5
 
 from clodius.core.coords import Chromsizes, GenomicRange
-from clodius.core.errors import TileError
-from clodius.core.tile import DenseTile, DenseTilePayload
+from clodius.core.errors import TileError, TilesetUnavailable
+from clodius.core.tile import DenseTile, TileKind
 from clodius.core.policies import (
     TilePolicy,
     reconcile_2d,
@@ -440,7 +440,23 @@ class CoolerTileset(BaseTileset):
             self._info = self._build_info()
         return self._info
 
-    def tiles(self, ids, options=None) -> list[tuple[TileId, DenseTilePayload]]:
+    def tiles(self, ids, options=None) -> list[tuple[TileId, TileKind]]:
+        """One entry per requested id; a refusal rides in the payload slot.
+
+        Overrides `BaseTileset.tiles` because tiles are batched per zoom
+        level and transform, and `_tile` reads through a shared reader.
+
+        Overriding also means the base's option refusal is not inherited, so
+        it is restated here: this tileset reads no batch options, and the
+        protocol makes a malformed one a whole-batch failure rather than
+        something to serve tiles in spite of.
+        """
+        if options:
+            raise TilesetUnavailable(
+                f"{type(self).__name__} accepts no tile options; got "
+                f"{sorted(options)}"
+            )
+
         # Batched per zoom level and transform, since those decide which cooler
         # and which weights a tile is read from.
         ids = list(ids)
@@ -448,15 +464,58 @@ class CoolerTileset(BaseTileset):
         for i, tid in enumerate(ids):
             batches.setdefault((tid.z, tid.modifier), []).append(i)
 
-        payloads: dict[int, DenseTilePayload] = {}
+        payloads: dict[int, TileKind] = {}
         for (z, modifier), indices in batches.items():
-            canvas = self.info().canvas(z)
-            clr = self._cooler(canvas.binsize)
-            balance = resolve_balance(clr, modifier)
-            with self.reader(clr, canvas, balance) as reader:
-                reader.prefetch(ids[i].pos for i in indices)
+            # Guarded like any other refusal. A zoom past the ladder and a
+            # transform the file does not carry are both ordinary client
+            # requests, and both raise TileError by contract -- outside a
+            # try they would fail the whole request, and because `batches`
+            # is keyed on (z, modifier), one bad id would take the *other*
+            # zoom groups down with it.
+            try:
+                canvas = self.info().canvas(z)
+                clr = self._cooler(canvas.binsize)
+                balance = resolve_balance(clr, modifier)
+            except TileError as exc:
                 for i in indices:
-                    payloads[i] = self._tile(ids[i], reader)
+                    payloads[i] = exc.to_dict()
+                continue
+
+            # One entry per requested id; a refusal rides in the payload slot.
+            #
+            # Positions are screened before the prefetch rather than inside
+            # the serving loop, because the prefetch reads every position in
+            # the batch up front: one off-lattice id would raise there and
+            # take its fifteen well-formed neighbours down with it, which is
+            # the whole failure this guard exists to prevent. `invert` is the
+            # canonical check, so the bounds test is not restated here.
+            servable = []
+            for i in indices:
+                try:
+                    for pos in ids[i].pos:
+                        canvas.invert(pos)
+                except TileError as exc:
+                    payloads[i] = exc.to_dict()
+                else:
+                    servable.append(i)
+
+            # Nothing to read: the reader's constructor materializes the whole
+            # bin1 offset index, which is tens of megabytes on a fine-binned
+            # genome, and a raise there would discard the error payloads just
+            # recorded for this group.
+            if not servable:
+                continue
+
+            # The catch stays narrow. An unopenable file is a whole-request
+            # failure, and answering with sixteen cheerful error payloads
+            # would be a lie -- which is what the cooler test asserts.
+            with self.reader(clr, canvas, balance) as reader:
+                reader.prefetch(ids[i].pos for i in servable)
+                for i in servable:
+                    try:
+                        payloads[i] = self._tile(ids[i], reader)
+                    except TileError as exc:
+                        payloads[i] = exc.to_dict()
         return [(tid, payloads[i]) for i, tid in enumerate(ids)]
 
     # --- internals ----------------------------------------------------------
@@ -488,7 +547,20 @@ class CoolerTileset(BaseTileset):
             if c not in BIN_COORDINATE_COLUMNS and c in shared
         ]
 
-        info = TilesetInfo(
+        # No max_width: for an explicit ladder the extent belongs to the zoom
+        # level, not the tileset, and Canvas derives it per level. Emitting a
+        # single value taken from the coarsest resolution is only correct for a
+        # power-of-two ladder; on the 4DN standard set it over-reports n_tiles
+        # at every finer zoom (200 vs 121 at z=6).
+        #
+        # `mirror_tiles` is passed as a constructor keyword rather than
+        # assigned afterwards: TilesetInfo is frozen, and its cached
+        # derivations are only sound because it is.
+        extras = {}
+        if clr.info.get("storage-mode") == "square":
+            extras["mirror_tiles"] = "false"
+
+        return TilesetInfo(
             min_pos=[1, 1],
             max_pos=[chromsizes.total_length, chromsizes.total_length],
             resolutions=list(resolutions),
@@ -498,12 +570,23 @@ class CoolerTileset(BaseTileset):
                 {"name": TRANSFORM_LABELS.get(c, c), "value": c}
                 for c in transforms
             ],
+            **extras,
         )
-        if clr.info.get("storage-mode") == "square":
-            info.mirror_tiles = "false"
-        return info
 
-    def _tile(self, tid: TileId, reader: BlockReader):
+    def _tile(self, tid: TileId, reader: BlockReader | None = None):
+        """One tile's payload, from a reader opened for the whole batch.
+
+        Widens `BaseTileset._tile` rather than contradicting it. The reader is
+        genuinely required -- `tiles()` opens one per zoom and modifier and
+        shares it across that group -- but a signature that adds a *required*
+        parameter is not an implementation of the hook it appears to override.
+        """
+        if reader is None:
+            raise TypeError(
+                f"{type(self).__name__}._tile needs a reader; call tiles(), "
+                f"which opens one per batch"
+            )
+
         x, y = tid.pos
         canvas = reader.canvas
         binsize = canvas.binsize

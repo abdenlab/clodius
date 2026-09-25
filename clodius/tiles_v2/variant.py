@@ -9,7 +9,6 @@ import polars as pl
 
 from clodius.core.coords import Chromsizes, GenomicRange
 from clodius.core.errors import (
-    TileError,
     TilesetUnavailable,
     TileTooWide,
 )
@@ -19,6 +18,8 @@ from clodius.core.policies import (
 )
 from clodius.core.tileid import TileId
 from clodius.core.tileset import BaseTileset, TilesetInfo
+from clodius.tiles_v2._exprs import known_chroms
+from clodius.tiles_v2._index import indexed_contigs, screen_regions
 
 TILE_SIZE = 1024
 HASH_SEED = 0x1F4B_5C0D
@@ -106,10 +107,21 @@ def overlap_predicate(ranges: Sequence[GenomicRange]) -> pl.Expr:
     return expr
 
 
-def to_bedlike(row: dict, offsets: dict[str, int]) -> AnnotationRecord:
-    """One materialized row as the client's bedlike shape."""
+def to_bedlike(row: dict, offsets: dict[str, int]) -> AnnotationRecord | None:
+    """One materialized row as the client's bedlike shape.
+
+    ``None`` when the record's contig is absent from ``offsets`` -- an
+    unplaced contig, a naming mismatch, or a different assembly build. The row
+    has no position on the genome-spanning axis, so it is skipped rather than
+    raising: a bare ``KeyError`` is not a
+    `clodius.core.errors.TileError` and would escape the server
+    boundary as a 500. Handled here rather than at the call sites so a third
+    caller cannot reintroduce it.
+    """
     chrom = row["chrom"]
-    offset = offsets[chrom]
+    offset = offsets.get(chrom)
+    if offset is None:
+        return None
     ids = row["id"] or []
     alts = row["alt"] or []
     filters = row["filter"] or []
@@ -210,6 +222,13 @@ class VariantTileset(BaseTileset):
                 tuple(n for n, _ in pairs), tuple(int(v) for _, v in pairs)
             )
         self._chromsizes = chromsizes
+        self._known_chroms = known_chroms(chromsizes, "chrom")
+        # What the index can be asked for; see `clodius.tiles_v2._index`.
+        self._index_contigs = (
+            indexed_contigs(self._path, self._index_path)
+            if self._is_indexed
+            else None
+        )
         self._info = self._build_info()
 
     def chromsizes(self) -> Chromsizes:
@@ -217,24 +236,6 @@ class VariantTileset(BaseTileset):
 
     def info(self) -> TilesetInfo:
         return self._info
-
-    def tiles(
-        self, ids: Sequence[TileId], options=None
-    ) -> list[tuple[TileId, list[AnnotationRecord]]]:
-        """One entry per requested id, always.
-
-        A per-tile refusal lands in that tile's payload slot rather than
-        aborting the batch. Only errors that are genuinely per-tile are caught
-        here -- an unreadable file still raises, because retrying the other
-        fifteen tiles against it is pointless.
-        """
-        out = []
-        for tid in ids:
-            try:
-                out.append((tid, self._tile(tid)))
-            except TileError as exc:
-                out.append((tid, exc.to_dict()))
-        return out
 
     def close(self) -> None:
         pass
@@ -252,16 +253,28 @@ class VariantTileset(BaseTileset):
         ``next()`` per skipped record; ``slice`` pushes the row count into the
         reader instead.
         """
+        # Filtered before the slice, which costs the reader-level row limit:
+        # the slice is evaluated above the filter rather than pushed into the
+        # scan node. The streaming engine still stops once the page fills, so
+        # the read is bounded by matching rows rather than by file rows. Do not
+        # "restore" the pushdown by reordering these two.
+        #
+        # Filtered first so `offset`, `limit` and the next-page probe all
+        # range over the same population. Filtering afterwards lets
+        # one unplaceable row consume the probe -- `has_next` goes False with
+        # records unread -- and leaves `offset` indexing raw file rows while
+        # the page is a filtered subset, so consecutive pages overlap.
         frame = (
             self._frame(regions=None)
+            .filter(self._known_chroms)
             .slice(offset, limit + 1)
             .collect(engine="streaming")
         )
         offsets = self._chromsizes.offsets
         rows = [
-            to_bedlike(r, offsets)
+            record
             for r in frame.to_dicts()
-            if r["chrom"] in offsets
+            if (record := to_bedlike(r, offsets)) is not None
         ]
         has_next = len(rows) > limit
         return [
@@ -348,16 +361,31 @@ class VariantTileset(BaseTileset):
             return []
 
         if self._is_indexed:
-            frame = self._frame([_region(gr) for gr in ranges])
+            # A contig the index does not carry has no variants, so this
+            # only drops queries that would have raised out of the reader
+            # as a ComputeError and failed the whole batch.
+            seekable = screen_regions(ranges, self._index_contigs)
+            if not seekable:
+                return []
+            frame = self._frame([_region(gr) for gr in seekable])
         else:
             self._check_scannable()
             frame = self._frame(None).filter(overlap_predicate(ranges))
 
+        # Bounded-memory downsampling, as bed.py and bedpe.py do it: `top_k`
+        # keeps a heap of `cap` rows, so peak memory does not depend on how
+        # many variants the tile covers. `_digest` is the same column
+        # `to_bedlike` scales into `importance`, so the records the client
+        # would have ranked highest are the ones that survive.
+        cap = self.policy.max_records
+        if cap is not None:
+            frame = frame.top_k(cap, by="_digest")
+
         offsets = self._chromsizes.offsets
         records = [
-            to_bedlike(row, offsets)
+            record
             for row in frame.collect(engine="streaming").to_dicts()
-            if row["chrom"] in offsets
+            if (record := to_bedlike(row, offsets)) is not None
         ]
         records.sort(key=lambda r: r["xStart"])
         return records

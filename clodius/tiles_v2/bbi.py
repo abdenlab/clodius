@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 
-from typing import Sequence
 
 import numpy as np
 import pybigtools
@@ -80,7 +79,16 @@ class BBITileset(BaseTileset):
         # Alternate pre-defined chromsizes orderings. The client can select
         # these per tile via `,cos:<uid>`.
         self._chromsizes_alts = chromsizes_alts or {}
-        self._info = self._info_for(self._chromsizes)
+        self._info = self._build_info(self._chromsizes)
+        # Built eagerly, for the same reason `self._info` is: rebuilding runs a
+        # full quadtree validation and hands back a cold `coordinate_system`,
+        # which `canvas()` then pays to rebuild. The alternates are fixed at
+        # construction, so this memo is bounded by configuration and cannot
+        # grow with request volume.
+        self._info_alts = {
+            uid: self._build_info(cs)
+            for uid, cs in self._chromsizes_alts.items()
+        }
 
     # --- resource lifetime --------------------------------------------------
 
@@ -118,28 +126,47 @@ class BBITileset(BaseTileset):
     def info(self) -> TilesetInfo:
         return self._info
 
-    def tiles(
-        self, ids: Sequence[TileId], options=None
-    ) -> list[tuple[TileId, DenseTilePayload | list[AnnotationRecord]]]:
-        return [(tid, self._tile(tid)) for tid in ids]
-
     # --- internals ----------------------------------------------------------
 
+    def _serves_nothing(self) -> bool:
+        """Whether the policy refuses every record before any I/O.
+
+        The cap is also enforced downstream, in `take_most_important`, but by
+        then the tile has been fetched and every record digested -- seconds of
+        work on a zoom-0 tile, to serve an empty list.
+        """
+        cap = self.policy.max_records
+        return cap is not None and cap <= 0
+
     def _info_for(self, chromsizes: Chromsizes) -> TilesetInfo:
-        """Tileset info under a given set of chromsizes."""
+        """Tileset info under a given set of chromsizes.
+
+        Every ordering this tileset can be asked for -- its own and each
+        `,cos:<uid>` alternate -- had its info built once at construction.
+        Rebuilding runs a full quadtree validation and hands back an instance
+        with a cold `coordinate_system` cache, so `canvas()` then rebuilds a
+        whole `Chromsizes` -- half a millisecond per tile on a heavily
+        scaffolded assembly, against under a microsecond for the cached info.
+        """
+        if chromsizes is self._chromsizes:
+            return self._info
+        for uid, alt in self._chromsizes_alts.items():
+            if chromsizes is alt:
+                return self._info_alts[uid]
+        return self._build_info(chromsizes)
+
+    def _build_info(self, chromsizes: Chromsizes) -> TilesetInfo:
         info = TilesetInfo.quadtree(
             chromsizes, self.tile_size, ndim=self.ndim, **self._info_extras()
         )
         # Range padded out to the full quadtree extent, as legacy does. One
         # entry per axis: a 2D track reads the y extent from ``max_pos[1]``.
         #
-        # Copied rather than assigned, so this keeps working against a frozen
-        # TilesetInfo: the assignment raises there, and it raises from
-        # `info()` -- which `tiles()` calls first -- so it would take every
-        # BBI tileset down, not only the 2D one.
-        return info.model_copy(
-            update={"max_pos": [info.max_width] * self.ndim}
-        )
+        # Derived rather than assigned: TilesetInfo is frozen, and `max_width`
+        # is computed inside `quadtree`, so there is nothing to pass in up
+        # front. `with_` re-validates and drops the cache; `model_copy` does
+        # neither.
+        return info.with_(max_pos=[info.max_width] * self.ndim)
 
     def _info_extras(self) -> dict:
         """Type-specific info fields, if any."""
@@ -205,11 +232,7 @@ class BBISignalTileset(BBITileset):
 
     def _tile(self, tid: TileId) -> DenseTilePayload:
         chromsizes = self._chromsizes_for(tid)
-        info = (
-            self._info
-            if chromsizes is self._chromsizes
-            else self._info_for(chromsizes)
-        )
+        info = self._info_for(chromsizes)
 
         # A range mode returns several values per bin instead of one, which is
         # what `size` on the payload announces.
@@ -252,9 +275,27 @@ def fetch_records(f, gr: GenomicRange) -> list[tuple]:
     return [(chrom,) + record for record in f.records(chrom, start, end)]
 
 
-def to_bedlike(record: tuple, chrom_offset: int) -> AnnotationRecord:
-    """One raw record as the client's bedlike shape."""
-    uid = hashlib.md5("".join(map(str, record)).encode("utf8")).hexdigest()
+def to_bedlike(
+    record: tuple, offsets: dict[str, int]
+) -> AnnotationRecord | None:
+    """One raw record as the client's bedlike shape.
+
+    ``None`` for a contig absent from ``offsets``: it has no place on the
+    canvas, so there is nothing to convert it to. The converter owns the
+    lookup rather than the call site, matching `to_interaction` below and the
+    three converters outcome 8 fixed.
+    """
+    chrom_offset = offsets.get(record[0])
+    if chrom_offset is None:
+        return None
+
+    # `usedforsecurity=False` for the same reason `stable_importance` carries
+    # it: a bucketing hash, not a security primitive. Without it this call
+    # raises first on a FIPS-enforcing build, so the flag downstream never
+    # gets the chance to help.
+    uid = hashlib.md5(
+        "".join(map(str, record)).encode("utf8"), usedforsecurity=False
+    ).hexdigest()
     return {
         "uid": uid,
         "chrOffset": chrom_offset,
@@ -276,6 +317,9 @@ class BBIAnnotationTileset(BBITileset):
     options = frozenset({"cos"})
 
     def _tile(self, tid: TileId) -> list[AnnotationRecord]:
+        if self._serves_nothing():
+            return []
+
         chromsizes = self._chromsizes_for(tid)
         canvas = self._info_for(chromsizes).canvas(tid.z)
 
@@ -290,12 +334,13 @@ class BBIAnnotationTileset(BBITileset):
             records.extend(fetch_records(self.file, gr))
 
         offsets = chromsizes.offsets
-        rows = [to_bedlike(r, offsets[r[0]]) for r in records]
-        cap = self.policy.max_records
-        if cap is None:
-            return rows
+        rows = [
+            row for r in records if (row := to_bedlike(r, offsets)) is not None
+        ]
+        # `take_most_important` owns what a cap of None means; restating it
+        # here would leave two surfaces encoding one rule.
         return take_most_important(
-            rows, cap, importance=lambda r: r["importance"]
+            rows, self.policy.max_records, importance=lambda r: r["importance"]
         )
 
 
@@ -330,7 +375,9 @@ def to_interaction(
     if x_offset is None or y_offset is None:
         return None
 
-    uid = hashlib.md5("".join(map(str, record)).encode("utf8")).hexdigest()
+    uid = hashlib.md5(
+        "".join(map(str, record)).encode("utf8"), usedforsecurity=False
+    ).hexdigest()
     try:
         importance = float(record[VALUE])
     except (TypeError, ValueError):
@@ -377,11 +424,8 @@ class BBIInteractionTileset(BBITileset):
     def _capped(
         self, rows: list[Annotation2DRecord]
     ) -> list[Annotation2DRecord]:
-        cap = self.policy.max_records
-        if cap is None:
-            return rows
         return take_most_important(
-            rows, cap, importance=lambda r: r["importance"]
+            rows, self.policy.max_records, importance=lambda r: r["importance"]
         )
 
 
@@ -391,6 +435,9 @@ class BBIInteraction2DTileset(BBIInteractionTileset):
     ndim = 2
 
     def _tile(self, tid: TileId) -> list[Annotation2DRecord]:
+        if self._serves_nothing():
+            return []
+
         chromsizes = self._chromsizes_for(tid)
         canvas = self._info_for(chromsizes).canvas(tid.z)
         x, y = tid.pos
@@ -423,6 +470,9 @@ class BBIInteractionLinksTileset(BBIInteractionTileset):
         self.link_policy = LinkPolicy(link_policy)
 
     def _tile(self, tid: TileId) -> list[Annotation2DRecord]:
+        if self._serves_nothing():
+            return []
+
         chromsizes = self._chromsizes_for(tid)
         canvas = self._info_for(chromsizes).canvas(tid.z)
         lo, hi = canvas.tile_span(tid.pos[0])

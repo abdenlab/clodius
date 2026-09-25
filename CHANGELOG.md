@@ -1,3 +1,16 @@
+Unreleased
+
+- Fix `take_most_important` returning every record at a cap of zero. The slice implementing the limit reads `ranked[-cap:]`, which at zero is the whole list, so a server configured to serve no records emitted an unbounded tile. The cap now also accepts `None`, which is what `TilePolicy` supplies when `max_records` is unset
+- Fix `TileCanvas.invert` returning a plausible `GenomicRange` for a position past the end of the lattice, and add the construction guards it had lost. Positions past the end of the *genome* but inside the canvas remain in range, since that padding is what fills the trailing NaN bins of a low-zoom tile
+- Fix an indexed BED serving its entire contents for a tile lying past the end of the genome. oxbow reads an empty region list as no region filter at all, while the scanning path's pushed-down predicate correctly matched nothing, so compressing a file changed what it served
+- Fix `BaseTileset.parse_tile_id` collapsing an empty `options` frozenset to `None`, which means "accept any option" and is the opposite of what an empty set declares
+- Fix `TileId.parse` accepting a negative zoom or position, and raising bare `ValueError` for a badly declared arity. Coordinates are now ASCII decimal only: `str.isdigit` admits superscripts that `int` then rejects with a `ValueError` that escapes the server boundary, and `int` itself admits `+5`, `1_0` and fullwidth digits, any of which would denote one tile under several distinct request strings
+- Fix `to_tile_record` raising `KeyError` for a record whose contig is absent from the chromsizes, which reached a client through the region listing as a 500
+- Fix `from clodius.core import *` raising `AttributeError`: `__all__` listed `Canvas`, a name no submodule binds, and omitted `TileCanvas`, which the facade imports
+- Make `TilesetInfo` frozen. Its cached coordinate system is only sound while the field it derives from cannot be reassigned
+- Make `stable_importance` pass `usedforsecurity=False`, so the thinning path keeps working on a FIPS-enforcing build where md5 is otherwise refused
+- Implement the per-tile error boundary in the eight tilesets that lacked it. `clodius/core/errors.py` documents a `TileError` as caught by `tiles()` and returned as that tile's payload; three tilesets did this and eight raised through the whole batch
+
 v0.22.2
 
 - Fix `tile_functions_parasail` D/I CIGAR inversion: `nw_trace_scan_profile_16`

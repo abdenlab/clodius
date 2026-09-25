@@ -9,8 +9,8 @@ import h5py
 import numpy as np
 
 from clodius.core.coords import Chromsizes, GenomicRange
-from clodius.core.errors import MalformedTileId
-from clodius.core.tile import DenseTile, DenseTilePayload
+from clodius.core.errors import MalformedTileId, TileError
+from clodius.core.tile import DenseTile, DenseTilePayload, TileKind
 from clodius.core.policies import TilePolicy, reconcile
 from clodius.core.tileid import TileId
 from clodius.core.tileset import BaseTileset, TilesetInfo
@@ -73,7 +73,7 @@ class MultivecTileset(BaseTileset):
         self._path = path
         self._file = None
         self._info = None
-        self.policy = policy or None
+        self.policy = policy or TilePolicy()
         self.tile_size = tile_size or int(self.file["info"].attrs["tile-size"])
 
     # --- resource lifetime --------------------------------------------------
@@ -112,11 +112,22 @@ class MultivecTileset(BaseTileset):
             self._info = self._build_info()
         return self._info
 
-    def tiles(self, ids, options=None) -> list[tuple[TileId, DenseTilePayload]]:
+    def tiles(self, ids, options=None) -> list[tuple[TileId, TileKind]]:
+        """One entry per requested id; a refusal rides in the payload slot.
+
+        Overrides `BaseTileset.tiles` because `_tile` takes a batch-wide
+        aggregation alongside the tile id.
+        """
         # Parsed once, not per tile: it is one setting for the whole batch, and
         # a bad one should fail the request rather than fifteen tiles over.
         aggregation = parse_row_aggregation(options, self.info().shape[1])
-        return [(tid, self._tile(tid, aggregation)) for tid in ids]
+        out = []
+        for tid in ids:
+            try:
+                out.append((tid, self._tile(tid, aggregation)))
+            except TileError as exc:
+                out.append((tid, exc.to_dict()))
+        return out
 
     # --- internals ----------------------------------------------------------
 
@@ -126,17 +137,20 @@ class MultivecTileset(BaseTileset):
         tile_size = self.tile_size
         n_rows = self._n_rows(resolutions[0])
 
-        info = TilesetInfo(
+        # Row metadata is passed in rather than assigned afterwards:
+        # TilesetInfo is frozen, and assigning to a frozen model raises a
+        # pydantic ValidationError -- which is not a TilesetError, and so
+        # escapes the server boundary as a 500 from `info()`, killing
+        # `tileset_info` and every tile for the file.
+        return TilesetInfo(
             min_pos=[0],
             max_pos=[chromsizes.total_length],
             resolutions=list(resolutions),
             tile_size=tile_size,
             chromsizes=chromsizes.to_pairs(),
             shape=[tile_size, n_rows],
+            **self._row_metadata(),
         )
-        for field, value in self._row_metadata().items():
-            setattr(info, field, value)
-        return info
 
     def _n_rows(self, resolution: int) -> int:
         grp = self.file[f"resolutions/{resolution}/values"]
@@ -216,6 +230,10 @@ AGG_FUNCS = {
     "max": np.amax,
 }
 
+#: The batch options this tileset reads. Distinct from ``options``, which
+#: declares the ``,key:value`` slot of a tile id -- a different channel.
+_ROW_AGG_KEYS = frozenset({"aggGroups", "aggFunc"})
+
 
 def parse_row_aggregation(options, n_rows: int):
     """Validate ``{"aggGroups", "aggFunc"}`` against a tileset of ``n_rows``.
@@ -226,6 +244,16 @@ def parse_row_aggregation(options, n_rows: int):
     """
     if not options:
         return None
+    # Refused rather than ignored, for the reason `BaseTileset.tiles` refuses
+    # what it cannot read: options arrive once for the whole batch, so serving
+    # tiles that quietly disregard what was asked for is the worse answer.
+    # This override is one of the two that bypass the base's own check.
+    unknown = set(options) - _ROW_AGG_KEYS
+    if unknown:
+        raise MalformedTileId(
+            f"unrecognized tile options {sorted(unknown)}; this tileset "
+            f"accepts {sorted(_ROW_AGG_KEYS)}"
+        )
     groups = options.get("aggGroups")
     func_name = options.get("aggFunc")
     if groups is None and func_name is None:
