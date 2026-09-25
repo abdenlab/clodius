@@ -25,6 +25,7 @@ only a path and a mode.
 
 import base64
 import hashlib
+import pathlib
 
 import numpy as np
 import pybigtools
@@ -252,6 +253,61 @@ def test_tiles_should_return_nothing_when_the_cap_is_zero(bigbed):
 
     # Assert
     assert records == []
+
+
+def test_tiles_should_refuse_a_zero_cap_without_reading_the_file(
+    bigbed, tmp_path
+):
+    """Test that a cap of zero costs nothing, not merely that it serves nothing.
+
+    Given:
+        An annotation tileset over a copy of the file, capped at zero, whose
+        file is removed after construction.
+    When:
+        The whole-genome tile is served.
+    Then:
+        It should return no records rather than raising. A missing file is the
+        only way to observe the absence of I/O from outside: refusing after the
+        read costs every record fetched and digested -- seconds on a zoom-0
+        tile -- to produce an empty list.
+    """
+    # Arrange
+    path = tmp_path / "annot.bb"
+    path.write_bytes(pathlib.Path(bigbed).read_bytes())
+    tileset = BBIAnnotationTileset(
+        str(path), policy=TilePolicy(max_records=0), tile_size=TILE_SIZE
+    )
+    path.unlink()
+
+    # Act
+    (_, records), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+    # Assert
+    assert records == []
+
+
+def test_tiles_should_read_the_file_when_the_cap_is_not_zero(bigbed, tmp_path):
+    """Test the control for the refusal above, so it pins the short-circuit.
+
+    Given:
+        The same tileset over the same removed file, capped at one instead.
+    When:
+        The whole-genome tile is served.
+    Then:
+        It should raise, because it reaches the file. Without this, the test
+        above would pass against a build that never reads anything.
+    """
+    # Arrange
+    path = tmp_path / "annot.bb"
+    path.write_bytes(pathlib.Path(bigbed).read_bytes())
+    tileset = BBIAnnotationTileset(
+        str(path), policy=TilePolicy(max_records=1), tile_size=TILE_SIZE
+    )
+    path.unlink()
+
+    # Act & assert
+    with pytest.raises(OSError):
+        tileset.tiles([tileset.parse_tile_id("u.0.0")])
 
 
 def test_tiles_should_return_an_error_payload_for_a_tile_off_the_canvas(

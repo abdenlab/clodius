@@ -18,6 +18,8 @@ Fixtures are synthesized into a temp directory, so the module runs on a
 checkout with no git-LFS payload.
 """
 
+import os
+
 import pytest
 
 from clodius.core.coords import Chromsizes
@@ -217,6 +219,59 @@ class TestGxfTileset:
 
         # Assert
         assert len(records) == 2
+
+    def test_tiles_should_refuse_a_zero_cap_without_reading_the_file(
+        self, make_gff
+    ):
+        """Test that a cap of zero costs nothing, not merely that it serves none.
+
+        Given:
+            A tileset capped at zero whose annotation is removed after
+            construction.
+        When:
+            The whole-genome tile is served.
+        Then:
+            It should return no records rather than raising. A missing file is
+            the only way to observe the absence of I/O from outside: refusing
+            after the scan costs the whole read and the gene-assembly pass to
+            produce an empty list.
+        """
+        # Arrange
+        path = make_gff(GENES, name="gone.gff")
+        tileset = GffGenesTileset(
+            path, CHROMSIZES, policy=TilePolicy(max_records=0)
+        )
+        os.remove(path)
+
+        # Act
+        (_, records), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+        # Assert
+        assert records == []
+
+    def test_tiles_should_read_the_file_when_the_cap_is_not_zero(
+        self, make_gff
+    ):
+        """Test the control for the refusal above, so it pins the short-circuit.
+
+        Given:
+            The same tileset over the same removed file, capped at one.
+        When:
+            The whole-genome tile is served.
+        Then:
+            It should raise, because it reaches the file. Without this, the
+            test above would pass against a build that never reads anything.
+        """
+        # Arrange
+        path = make_gff(GENES, name="gone2.gff")
+        tileset = GffGenesTileset(
+            path, CHROMSIZES, policy=TilePolicy(max_records=1)
+        )
+        os.remove(path)
+
+        # Act & assert
+        with pytest.raises(OSError):
+            tileset.tiles([tileset.parse_tile_id("u.0.0")])
 
     def test_tiles_should_return_nothing_when_no_row_carries_a_gene(
         self, make_gff

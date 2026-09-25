@@ -119,6 +119,16 @@ class BBITileset(BaseTileset):
 
     # --- internals ----------------------------------------------------------
 
+    def _serves_nothing(self) -> bool:
+        """Whether the policy refuses every record before any I/O.
+
+        The cap is also enforced downstream, in `take_most_important`, but by
+        then the tile has been fetched and every record digested -- seconds of
+        work on a zoom-0 tile, to serve an empty list.
+        """
+        cap = self.policy.max_records
+        return cap is not None and cap <= 0
+
     def _info_for(self, chromsizes: Chromsizes) -> TilesetInfo:
         """Tileset info under a given set of chromsizes.
 
@@ -283,6 +293,9 @@ class BBIAnnotationTileset(BBITileset):
     options = frozenset({"cos"})
 
     def _tile(self, tid: TileId) -> list[AnnotationRecord]:
+        if self._serves_nothing():
+            return []
+
         chromsizes = self._chromsizes_for(tid)
         canvas = self._info_for(chromsizes).canvas(tid.z)
 
@@ -396,6 +409,9 @@ class BBIInteraction2DTileset(BBIInteractionTileset):
     ndim = 2
 
     def _tile(self, tid: TileId) -> list[Annotation2DRecord]:
+        if self._serves_nothing():
+            return []
+
         chromsizes = self._chromsizes_for(tid)
         canvas = self._info_for(chromsizes).canvas(tid.z)
         x, y = tid.pos
@@ -428,6 +444,9 @@ class BBIInteractionLinksTileset(BBIInteractionTileset):
         self.link_policy = LinkPolicy(link_policy)
 
     def _tile(self, tid: TileId) -> list[Annotation2DRecord]:
+        if self._serves_nothing():
+            return []
+
         chromsizes = self._chromsizes_for(tid)
         canvas = self._info_for(chromsizes).canvas(tid.z)
         lo, hi = canvas.tile_span(tid.pos[0])

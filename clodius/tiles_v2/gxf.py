@@ -603,6 +603,13 @@ class GxfTileset(BaseTileset):
         return to_gene_records(genes, offsets)
 
     def _tile(self, tid: TileId) -> list[AnnotationRecord]:
+        # Before the read, not after it. `_thin` refuses a non-positive cap
+        # too, but by then the tile has been scanned and linked into genes --
+        # seconds of work on a zoom-0 tile, to serve an empty list.
+        cap = self.policy.max_records
+        if cap is not None and cap <= 0:
+            return []
+
         ranges = list(self._info.canvas(tid.z).invert(tid.pos[0]))
         rows = self._rows(ranges)
         genes = self._thin(build_genes(rows, self._dialect))
