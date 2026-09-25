@@ -448,11 +448,22 @@ class CoolerTileset(BaseTileset):
         for i, tid in enumerate(ids):
             batches.setdefault((tid.z, tid.modifier), []).append(i)
 
-        payloads: dict[int, DenseTilePayload] = {}
+        payloads: dict[int, TileKind] = {}
         for (z, modifier), indices in batches.items():
-            canvas = self.info().canvas(z)
-            clr = self._cooler(canvas.binsize)
-            balance = resolve_balance(clr, modifier)
+            # Guarded like any other refusal. A zoom past the ladder and a
+            # transform the file does not carry are both ordinary client
+            # requests, and both raise TileError by contract -- outside a
+            # try they would fail the whole request, and because `batches`
+            # is keyed on (z, modifier), one bad id would take the *other*
+            # zoom groups down with it.
+            try:
+                canvas = self.info().canvas(z)
+                clr = self._cooler(canvas.binsize)
+                balance = resolve_balance(clr, modifier)
+            except TileError as exc:
+                for i in indices:
+                    payloads[i] = exc.to_dict()
+                continue
 
             # One entry per requested id; a refusal rides in the payload slot.
             #
@@ -471,6 +482,13 @@ class CoolerTileset(BaseTileset):
                     payloads[i] = exc.to_dict()
                 else:
                     servable.append(i)
+
+            # Nothing to read: the reader's constructor materializes the whole
+            # bin1 offset index, which is tens of megabytes on a fine-binned
+            # genome, and a raise there would discard the error payloads just
+            # recorded for this group.
+            if not servable:
+                continue
 
             # The catch stays narrow. An unopenable file is a whole-request
             # failure, and answering with sixteen cheerful error payloads
