@@ -305,11 +305,10 @@ class BBIAnnotationTileset(BBITileset):
 
         offsets = chromsizes.offsets
         rows = [to_bedlike(r, offsets[r[0]]) for r in records]
-        cap = self.policy.max_records
-        if cap is None:
-            return rows
+        # `take_most_important` owns what a cap of None means; restating it
+        # here would leave two surfaces encoding one rule.
         return take_most_important(
-            rows, cap, importance=lambda r: r["importance"]
+            rows, self.policy.max_records, importance=lambda r: r["importance"]
         )
 
 
@@ -393,11 +392,8 @@ class BBIInteractionTileset(BBITileset):
     def _capped(
         self, rows: list[Annotation2DRecord]
     ) -> list[Annotation2DRecord]:
-        cap = self.policy.max_records
-        if cap is None:
-            return rows
         return take_most_important(
-            rows, cap, importance=lambda r: r["importance"]
+            rows, self.policy.max_records, importance=lambda r: r["importance"]
         )
 
 
