@@ -42,10 +42,11 @@ def _is_int(text: str) -> bool:
     boundary as a 500; and ``str.isdecimal`` alone still admits fullwidth
     digits, where ``int`` succeeds and ``abc.3.１`` silently denotes tile 1.
 
-    This does not close every alias: ``abc.-0.0``, ``abc.00.007`` and
-    ``abc.0.0`` still denote one tile under three ids. The answer is correct
-    either way, since ``raw`` is echoed back verbatim; only the cache key
-    duplicates.
+    This does not close every alias. Leading zeros and a negative zero are
+    not normalized, so a tile has more than one spelling: ``abc.-0.0`` and
+    ``abc.0.0`` both denote tile 0, and ``abc.00.007`` and ``abc.0.7`` both
+    denote tile 7. The answer is correct either way, since ``raw`` is echoed
+    back verbatim; only the cache key duplicates.
     """
     return text.isascii() and (
         text.isdecimal() or (text[:1] == "-" and text[1:].isdecimal())

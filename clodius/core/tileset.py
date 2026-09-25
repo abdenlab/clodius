@@ -131,12 +131,15 @@ class BaseTileset:
 
     modifiers: ClassVar[ModifierSpec | None] = None
     options: ClassVar[frozenset[str]] = frozenset()
-    # Annotated, deliberately not assigned. `Tileset` is a runtime-checkable
-    # Protocol, so `isinstance` is an attribute-presence test and `ndim` is one
-    # of the attributes it tests -- a concrete default here would make a
-    # subclass that forgot to declare one pass the only published "is this
-    # servable" check. The absence is caught in `parse_tile_id` instead, where
-    # it can be reported as the server-side misdeclaration it is.
+    # Annotated, deliberately not assigned. An inherited default would let a
+    # subclass that forgot to declare its arity serve tiles at someone else's,
+    # silently; the absence is caught in `parse_tile_id` instead, where it is
+    # reported as the server-side misdeclaration it is. What the annotation
+    # buys is that named error rather than an `AttributeError` at the first
+    # request. It also keeps `isinstance(x, Tileset)` honest -- the protocol is
+    # runtime-checkable, so that check tests for the attribute's presence --
+    # though nothing in the tree performs it, and the class-level
+    # `issubclass` form is unavailable for a protocol with non-method members.
     ndim: ClassVar[int]
 
     tile_size: int
@@ -271,10 +274,14 @@ class DatasetInfo(BaseModel):
     def with_(self, **changes: Any) -> Self:
         """A copy with ``changes`` applied, re-validated.
 
-        Unlike ``model_copy(update=...)`` this runs the constructor, so a
-        misspelled key or an out-of-range value is rejected rather than served
-        verbatim, and any cached derivation is rebuilt from the new fields
-        instead of surviving the copy. Mirrors `TilePolicy.with_`.
+        Unlike ``model_copy(update=...)`` this runs the constructor, so an
+        out-of-range value is rejected rather than served verbatim, and any
+        cached derivation is rebuilt from the new fields instead of surviving
+        the copy. Mirrors `TilePolicy.with_`.
+
+        A misspelled key is *not* caught, by either route: the model allows
+        extra fields, so the constructor accepts an unknown name and
+        `to_dict()` ships it to the client.
         """
         return type(self)(**{**self.model_dump(exclude_none=True), **changes})
 
@@ -302,14 +309,15 @@ class DatasetInfo(BaseModel):
 class TilesetInfo(DatasetInfo):
     """A :class:`DatasetInfo` that also carries a resolution ladder.
 
-    Frozen. The `coordinate_system` cached on it is only sound because the
-    field it reads cannot change underneath it.
+    Frozen, which is what makes the cached `coordinate_system` sound: the
+    field it reads cannot be rebound underneath it. Only rebound -- pydantic's
+    freeze does not reach inside the list, so mutating ``chromsizes`` in place
+    leaves the cache stale and is unsupported.
 
-    Derive a variant with :meth:`with_`, which re-validates and rebuilds the
-    cache. ``model_copy(update=...)`` does neither: a misspelled key is served
-    verbatim, an out-of-range value is accepted where the constructor would
-    reject it, and a copy updating ``chromsizes`` keeps the coordinate system
-    derived from the old ones.
+    Derive a variant with `with_`, which re-validates and rebuilds the cache.
+    ``model_copy(update=...)`` does neither: an out-of-range value is accepted
+    where the constructor would reject it, and a copy updating ``chromsizes``
+    keeps the coordinate system derived from the old ones.
     """
 
     model_config = ConfigDict(extra="allow", frozen=True)

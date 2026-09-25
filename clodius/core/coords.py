@@ -350,13 +350,14 @@ class TileCanvas:
         Raises
         ------
         TileOutOfBounds
-            If ``x`` does not exist at this zoom; see :meth:`invert` for what
-            counts as in range. The bound is checked here as well as there
-            because the tilesets that work in absolute coordinates -- beddb,
-            bed2ddb and the bigInteract pair -- call only this one, and an
-            unchecked off-lattice position yields a well-formed range far past
-            the genome, zero rows, and an empty tile a client cannot tell apart
-            from "no annotations here".
+            If ``x`` does not exist at this zoom; see `invert` for what
+            counts as in range. Checked here as well as there because a
+            position reaching this method has not necessarily passed through
+            `invert` first -- a tileset working in absolute coordinates may
+            call only this one, and the 2D bigInteract tile's ``y`` is screened
+            nowhere else. Unchecked, an off-lattice position yields a
+            well-formed range far past the genome, zero rows, and an empty tile
+            a client cannot tell apart from "no annotations here".
         """
         self._check_pos(x)
         width = self.binsize * self.tile_size
