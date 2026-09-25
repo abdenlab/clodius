@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Callable, ClassVar, Sequence
+from typing import Callable, ClassVar
 
 import oxbow as ox
 import polars as pl
 
 from clodius.core.coords import Chromsizes, natsorted
-from clodius.core.errors import TileError, TilesetUnavailable, TileTooWide
+from clodius.core.errors import TilesetUnavailable, TileTooWide
 from clodius.core.tile import ReadsTile, ReadsTilePayload
 from clodius.core.policies import TilePolicy
 from clodius.core.tileid import TileId
@@ -442,18 +442,6 @@ class AlignmentTileset(BaseTileset):
 
     def info(self) -> TilesetInfo:
         return self._info
-
-    def tiles(
-        self, ids: Sequence[TileId], options=None
-    ) -> list[tuple[TileId, ReadsTilePayload]]:
-        """One entry per requested id, always."""
-        out = []
-        for tid in ids:
-            try:
-                out.append((tid, self._tile(tid)))
-            except TileError as exc:
-                out.append((tid, exc.to_dict()))
-        return out
 
     def close(self) -> None:
         pass

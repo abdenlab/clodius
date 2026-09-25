@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Iterator, Sequence
+from typing import Iterator
 
 import apsw
 import sosqlite
@@ -103,9 +103,6 @@ class _Bed2ddbBase(BaseTileset):
 
     def info(self) -> TilesetInfo:
         return self._info
-
-    def tiles(self, ids: Sequence[TileId], options=None):
-        return [(tid, self._tile(tid)) for tid in ids]
 
     # --- what the subclasses supply -----------------------------------------
 
