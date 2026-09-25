@@ -262,7 +262,13 @@ def fetch_records(f, gr: GenomicRange) -> list[tuple]:
 
 def to_bedlike(record: tuple, chrom_offset: int) -> AnnotationRecord:
     """One raw record as the client's bedlike shape."""
-    uid = hashlib.md5("".join(map(str, record)).encode("utf8")).hexdigest()
+    # `usedforsecurity=False` for the same reason `stable_importance` carries
+    # it: a bucketing hash, not a security primitive. Without it this call
+    # raises first on a FIPS-enforcing build, so the flag downstream never
+    # gets the chance to help.
+    uid = hashlib.md5(
+        "".join(map(str, record)).encode("utf8"), usedforsecurity=False
+    ).hexdigest()
     return {
         "uid": uid,
         "chrOffset": chrom_offset,
@@ -338,7 +344,9 @@ def to_interaction(
     if x_offset is None or y_offset is None:
         return None
 
-    uid = hashlib.md5("".join(map(str, record)).encode("utf8")).hexdigest()
+    uid = hashlib.md5(
+        "".join(map(str, record)).encode("utf8"), usedforsecurity=False
+    ).hexdigest()
     try:
         importance = float(record[VALUE])
     except (TypeError, ValueError):
