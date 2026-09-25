@@ -132,8 +132,14 @@ class BBITileset(BaseTileset):
         )
         # Range padded out to the full quadtree extent, as legacy does. One
         # entry per axis: a 2D track reads the y extent from ``max_pos[1]``.
-        info.max_pos = [info.max_width] * self.ndim
-        return info
+        #
+        # Copied rather than assigned, so this keeps working against a frozen
+        # TilesetInfo: the assignment raises there, and it raises from
+        # `info()` -- which `tiles()` calls first -- so it would take every
+        # BBI tileset down, not only the 2D one.
+        return info.model_copy(
+            update={"max_pos": [info.max_width] * self.ndim}
+        )
 
     def _info_extras(self) -> dict:
         """Type-specific info fields, if any."""
