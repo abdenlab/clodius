@@ -80,6 +80,15 @@ class BBITileset(BaseTileset):
         # these per tile via `,cos:<uid>`.
         self._chromsizes_alts = chromsizes_alts or {}
         self._info = self._build_info(self._chromsizes)
+        # Built eagerly, for the same reason `self._info` is: rebuilding runs a
+        # full quadtree validation and hands back a cold `coordinate_system`,
+        # which `canvas()` then pays to rebuild. The alternates are fixed at
+        # construction, so this memo is bounded by configuration and cannot
+        # grow with request volume.
+        self._info_alts = {
+            uid: self._build_info(cs)
+            for uid, cs in self._chromsizes_alts.items()
+        }
 
     # --- resource lifetime --------------------------------------------------
 
@@ -132,15 +141,18 @@ class BBITileset(BaseTileset):
     def _info_for(self, chromsizes: Chromsizes) -> TilesetInfo:
         """Tileset info under a given set of chromsizes.
 
-        The tileset's own chromsizes are the case by far the most tiles take,
-        and the info for those was built once at construction. Rebuilding it
-        runs a full quadtree validation and hands back an instance with a cold
-        `coordinate_system` cache, so `canvas()` then rebuilds a whole
-        `Chromsizes` -- half a millisecond per tile on a heavily scaffolded
-        assembly, against under a microsecond for the cached info.
+        Every ordering this tileset can be asked for -- its own and each
+        `,cos:<uid>` alternate -- had its info built once at construction.
+        Rebuilding runs a full quadtree validation and hands back an instance
+        with a cold `coordinate_system` cache, so `canvas()` then rebuilds a
+        whole `Chromsizes` -- half a millisecond per tile on a heavily
+        scaffolded assembly, against under a microsecond for the cached info.
         """
         if chromsizes is self._chromsizes:
             return self._info
+        for uid, alt in self._chromsizes_alts.items():
+            if chromsizes is alt:
+                return self._info_alts[uid]
         return self._build_info(chromsizes)
 
     def _build_info(self, chromsizes: Chromsizes) -> TilesetInfo:

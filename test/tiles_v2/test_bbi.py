@@ -31,6 +31,7 @@ import numpy as np
 import pybigtools
 import pytest
 
+from clodius.core.coords import Chromsizes
 from clodius.core.policies import TilePolicy
 from clodius.tiles_v2.bbi import (
     BBIAnnotationTileset,
@@ -308,6 +309,47 @@ def test_tiles_should_read_the_file_when_the_cap_is_not_zero(bigbed, tmp_path):
     # Act & assert
     with pytest.raises(OSError):
         tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+
+def test_tiles_should_place_records_by_the_ordering_the_tile_selects(bigbed):
+    """Test the ``,cos:`` path against a tileset built on that ordering.
+
+    Given:
+        An annotation tileset carrying an alternate chromosome ordering, and a
+        second tileset built directly on that ordering.
+    When:
+        The whole-genome tile is served, selecting the alternate on the first.
+    Then:
+        Both should place the records identically. The alternate's info is now
+        built once at construction rather than per tile, and a memo that
+        handed back the wrong ordering's info would misplace every record
+        while still looking like a well-formed tile.
+    """
+    # Arrange
+    # Only the two contigs the fixture carries records for: pybigtools drops
+    # a contig with no records from the file's chrom list, and asking for one
+    # that is not there is a KeyError rather than an empty read.
+    default = Chromsizes(("c1", "c2"), (1000, 1500))
+    reordered = Chromsizes(("c2", "c1"), (1500, 1000))
+    tileset = BBIAnnotationTileset(
+        bigbed,
+        chromsizes=default,
+        chromsizes_alts={"alt": reordered},
+        tile_size=TILE_SIZE,
+    )
+    reference = BBIAnnotationTileset(
+        bigbed, chromsizes=reordered, tile_size=TILE_SIZE
+    )
+
+    # Act
+    (_, selected), = tileset.tiles(
+        [tileset.parse_tile_id("u.0.0,cos:alt")]
+    )
+    (_, expected), = reference.tiles([reference.parse_tile_id("u.0.0")])
+
+    # Assert
+    assert [r["xStart"] for r in selected] == [r["xStart"] for r in expected]
+    assert selected != []
 
 
 def test_tiles_should_return_an_error_payload_for_a_tile_off_the_canvas(
