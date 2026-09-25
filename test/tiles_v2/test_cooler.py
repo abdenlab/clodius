@@ -17,6 +17,7 @@ committed multires cooler is a legacy implicit-ladder file with no
 
 import pytest
 
+from clodius.core.coords import Chromsizes
 from clodius.core.errors import UnsupportedOption
 from clodius.core.tileid import TileId
 from clodius.tiles_v2.cooler import CoolerTileset
@@ -121,8 +122,12 @@ def test_tiles_should_raise_when_the_file_cannot_be_opened():
         cheerful error payloads and a 200, when the honest answer is that the
         dataset cannot be served at all.
     """
-    # Arrange
-    tileset = CoolerTileset("/nonexistent/none.mcool")
+    # Arrange. Chromsizes are passed so that construction stays lazy: the
+    # constructor reads them off the file when they are not given, and the
+    # failure under test belongs to tiles(), not to __init__.
+    tileset = CoolerTileset(
+        "/nonexistent/none.mcool", chromsizes=Chromsizes(("chr1",), (1000,))
+    )
     tid = TileId.parse("u.0.0.0", ndim=2)
 
     # Act & assert
