@@ -179,9 +179,13 @@ class _BedpeBase(BaseTileset):
     # --- what the subclasses supply -----------------------------------------
 
     def _select(
-        self, canvas, tid: TileId
+        self, axes: list[list[GenomicRange]]
     ) -> tuple[pl.Expr, list[GenomicRange] | None]:
         """The tile's selection predicate, and the anchor-1 ranges to seek.
+
+        ``axes`` holds the genomic ranges each of the tile's coordinate slots
+        covers, already inverted by the caller and already screened for a slot
+        with nothing in bounds.
 
         Returning the seek ranges alongside the predicate keeps the two
         consistent: a subclass cannot ask for a seek that its predicate does not
@@ -253,7 +257,20 @@ class _BedpeBase(BaseTileset):
 
     def _tile(self, tid: TileId) -> list[Annotation2DRecord]:
         canvas = self._info.canvas(tid.z)
-        predicate, seek_to = self._select(canvas, tid)
+
+        # Screened before any frame is built. `max_width` always exceeds the
+        # genome length, so a tile past the end of the genome is routine --
+        # and there every range is out of bounds, the seek list collapses to
+        # "no restriction", and `_check_scannable` raises TilesetUnavailable
+        # for an indexed file above the ceiling. That is a *sibling* of
+        # TileError, not a subclass, so the per-tile boundary does not catch
+        # it and one routine off-the-end tile fails the whole request. Under
+        # the ceiling it merely scans the file end to end to match nothing.
+        axes = [list(canvas.invert(pos)) for pos in tid.pos]
+        if any(all(gr.is_out_of_bounds for gr in axis) for axis in axes):
+            return []
+
+        predicate, seek_to = self._select(axes)
 
         frame = (
             self._frame(seek_to)
@@ -294,9 +311,8 @@ class BedpeTileset(_BedpeBase):
     ndim: ClassVar[int] = 2
     datatype: ClassVar[str] = "2d-rectangle-domains"
 
-    def _select(self, canvas, tid):
-        x_ranges = list(canvas.invert(tid.pos[0]))
-        y_ranges = list(canvas.invert(tid.pos[1]))
+    def _select(self, axes):
+        x_ranges, y_ranges = axes
         predicate = _anchor_overlaps(
             x_ranges, "chrom", "start", "end"
         ) & _anchor_overlaps(y_ranges, "chrom2", "start2", "end2")
@@ -334,8 +350,8 @@ class BedpeLinksTileset(_BedpeBase):
     def link_policy(self) -> LinkPolicy:
         return self._link_policy
 
-    def _select(self, canvas, tid):
-        ranges = list(canvas.invert(tid.pos[0]))
+    def _select(self, axes):
+        (ranges,) = axes
         a1 = _anchor_overlaps(ranges, "chrom", "start", "end")
         a2 = _anchor_overlaps(ranges, "chrom2", "start2", "end2")
 
