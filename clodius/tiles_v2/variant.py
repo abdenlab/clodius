@@ -354,6 +354,15 @@ class VariantTileset(BaseTileset):
             self._check_scannable()
             frame = self._frame(None).filter(overlap_predicate(ranges))
 
+        # Bounded-memory downsampling, as bed.py and bedpe.py do it: `top_k`
+        # keeps a heap of `cap` rows, so peak memory does not depend on how
+        # many variants the tile covers. `_digest` is the same column
+        # `to_bedlike` scales into `importance`, so the records the client
+        # would have ranked highest are the ones that survive.
+        cap = self.policy.max_records
+        if cap is not None:
+            frame = frame.top_k(cap, by="_digest")
+
         offsets = self._chromsizes.offsets
         records = [
             record

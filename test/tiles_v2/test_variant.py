@@ -24,6 +24,7 @@ checkout with no git-LFS payload.
 import pytest
 
 from clodius.core.coords import Chromsizes
+from clodius.core.policies import TilePolicy
 from clodius.tiles_v2.variant import VcfTileset, to_bedlike
 
 #: The chromsizes the tileset is served against, which name only ``c1``.
@@ -158,6 +159,35 @@ class TestVariantTileset:
         # Assert
         assert "z" not in names(records)
         assert records
+
+    @pytest.mark.parametrize("cap,expected", [(0, 0), (3, 3), (None, 10)])
+    def test_tiles_should_return_at_most_the_capped_number_of_records(
+        self, make_vcf, cap, expected
+    ):
+        """Test the record cap, which a VCF tile is subject to like any other.
+
+        Given:
+            A VCF carrying ten placeable variants, under a policy capping
+            records at zero, at three, and at no limit.
+        When:
+            The whole-genome tile is served.
+        Then:
+            It should return no more than the cap. The tile read every variant
+            at every setting, so a server configured to serve none emitted an
+            unbounded tile -- the precise failure the cap exists to prevent.
+        """
+        # Arrange
+        tileset = VcfTileset(
+            make_vcf(),
+            chromsizes=CHROMSIZES,
+            policy=TilePolicy(max_records=cap),
+        )
+
+        # Act
+        (_, records), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+        # Assert
+        assert len(records) == expected
 
     def test_regions_should_report_a_next_page_when_one_remains(
         self, make_vcf
