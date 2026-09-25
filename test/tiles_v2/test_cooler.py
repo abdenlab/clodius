@@ -135,3 +135,104 @@ def test_tiles_should_raise_when_the_file_cannot_be_opened():
         tileset.tiles([tid])
     assert not isinstance(excinfo.value, dict)
     assert isinstance(excinfo.value, (OSError, ValueError))
+
+
+def test_tiles_should_return_an_error_payload_for_a_zoom_past_the_ladder(
+    symmetric_mcool,
+):
+    """Test that a bad zoom refuses one tile rather than the request.
+
+    Given:
+        A batch holding one well-formed tile id and one naming a zoom above
+        the resolution ladder, as a client with a stale tileset info sends.
+    When:
+        The batch is served.
+    Then:
+        It should return a dense payload for the good id and an error payload
+        for the bad one. Tiles are batched by ``(zoom, transform)``, so a raise
+        here loses the answers already computed for the *other* zoom groups in
+        the same request, not only the neighbours of the offending id.
+    """
+    # Arrange
+    tileset = CoolerTileset(symmetric_mcool)
+    past_the_end = tileset.info().num_zoom_levels + 5
+    ids = [
+        tileset.parse_tile_id("u.0.0.0"),
+        tileset.parse_tile_id(f"u.{past_the_end}.0.0"),
+    ]
+
+    # Act
+    served = tileset.tiles(ids)
+
+    # Assert
+    assert "error" not in served[0][1]
+    assert served[1][1]["error"]
+
+
+def test_tiles_should_return_an_error_payload_for_an_unknown_transform(
+    symmetric_mcool,
+):
+    """Test the second per-batch key, which fails the same way.
+
+    Given:
+        A batch holding one well-formed tile id and one naming a weight column
+        the file does not carry. The modifier spec sets ``allow_unknown``, so
+        any transform string reaches the resolver.
+    When:
+        The batch is served.
+    Then:
+        It should return a dense payload for the good id and an error payload
+        for the bad one. Screening positions alone leaves this open: the
+        transform is resolved before any position is looked at.
+    """
+    # Arrange
+    tileset = CoolerTileset(symmetric_mcool)
+    ids = [
+        tileset.parse_tile_id("u.0.0.0"),
+        tileset.parse_tile_id("u.0.0.0.nosuchweight"),
+    ]
+
+    # Act
+    served = tileset.tiles(ids)
+
+    # Assert
+    assert "error" not in served[0][1]
+    assert served[1][1]["error"]
+
+
+def test_tiles_should_not_open_a_reader_when_nothing_in_the_batch_is_servable(
+    symmetric_mcool,
+):
+    """Test that an all-refused batch touches the pixel store not at all.
+
+    Given:
+        A batch in which every position lies off the lattice, so the position
+        screen empties it.
+    When:
+        The batch is served.
+    Then:
+        It should answer with error payloads without constructing a reader.
+        The constructor is not cheap setup -- it opens the store and
+        materializes the whole bin1 offset index, tens of megabytes on a
+        finely binned genome -- and a raise inside it would discard the error
+        payloads already recorded for the batch.
+    """
+    # Arrange. `reader` is the instance attribute the batch loop constructs
+    # through, so wrapping it counts openings without reaching into internals.
+    tileset = CoolerTileset(symmetric_mcool)
+    opened = []
+    build = tileset.reader
+
+    def counting_reader(*args, **kwargs):
+        opened.append(args)
+        return build(*args, **kwargs)
+
+    tileset.reader = counting_reader
+    ids = [tileset.parse_tile_id(f"u.0.{x}.0") for x in (9999, 8888)]
+
+    # Act
+    served = tileset.tiles(ids)
+
+    # Assert
+    assert [payload["error"] for _, payload in served]
+    assert opened == []

@@ -6,11 +6,9 @@ records. Both concrete classes derive their info the same way -- build a
 quadtree over the chromsizes, then pad ``max_pos`` out to the quadtree extent
 so the client's axis matches the grid the tiles are cut from.
 
-That padding is the part under test here. It is applied with
-``model_copy(update=...)``, which does not validate: a misspelled key is
-carried into the served info verbatim, and a value the constructor would
-reject is accepted. So the served info is the only place a broken derivation
-becomes visible, and nothing looked at it before.
+That padding is the part under test here. It is applied by deriving a variant
+of the info, and the served info is the only place a broken derivation becomes
+visible -- nothing looked at it before.
 
 The fixtures are synthesized with pybigtools in milliseconds. Note that the
 chromsizes go to ``write``, not to ``open`` -- the wrapper's ``open`` takes
@@ -18,6 +16,7 @@ only a path and a mode.
 """
 
 import base64
+import hashlib
 
 import numpy as np
 import pybigtools
@@ -213,3 +212,62 @@ def test_tiles_should_return_an_error_payload_for_a_tile_off_the_canvas(
     # Assert
     assert bin_count(results[0][1]) == TILE_SIZE
     assert results[1][1]["error_type"] == "TileOutOfBounds"
+
+
+def test_tiles_should_return_every_record_when_the_cap_is_none(bigbed):
+    """Test the uncapped path, which now runs through the same thinning call.
+
+    Given:
+        An annotation tileset under a policy naming no record cap.
+    When:
+        The whole-genome tile is served.
+    Then:
+        It should return every feature. The caller used to short-circuit on
+        ``None`` before reaching ``take_most_important``, which left two
+        surfaces encoding what ``None`` means and the callee's own branch dead
+        -- the one that would be missed when the rule changes.
+    """
+    # Arrange
+    tileset = BBIAnnotationTileset(
+        bigbed, tile_size=TILE_SIZE, policy=TilePolicy(max_records=None)
+    )
+
+    # Act
+    (_, records), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+    # Assert
+    assert len(records) == 3
+
+
+def test_tiles_should_digest_a_record_without_requiring_md5_for_security(
+    bigbed, monkeypatch
+):
+    """Test that the per-record digest survives a FIPS-enforcing build.
+
+    Given:
+        An annotation tileset, and an ``md5`` that refuses any call not marked
+        as non-security -- which is how a FIPS build behaves.
+    When:
+        A tile is served.
+    Then:
+        It should serve the records anyway. The flag was added to
+        ``stable_importance``, but the uid is digested first and passed in, so
+        this call raises before the marked one is ever reached and the
+        hardening never takes effect.
+    """
+    # Arrange
+    real_md5 = hashlib.md5
+
+    def fips_md5(*args, **kwargs):
+        if kwargs.get("usedforsecurity", True) is not False:
+            raise ValueError("md5 is not available in FIPS mode")
+        return real_md5(*args, **kwargs)
+
+    monkeypatch.setattr(hashlib, "md5", fips_md5)
+    tileset = BBIAnnotationTileset(bigbed, tile_size=TILE_SIZE)
+
+    # Act
+    (_, records), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+    # Assert
+    assert len(records) == 3

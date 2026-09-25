@@ -322,3 +322,67 @@ def test_tiles_should_not_let_an_unknown_contig_consume_a_cap_slot(make_bed):
     # Assert
     assert len(records) == 3
     assert all(r["fields"][0] != "cUNKNOWN" for r in records)
+
+
+#: Ten placeable records with an unplaceable one wedged in at index 2, so a
+#: five-row page straddles it and the next page starts after it.
+PAGED = (
+    [("c1", i * 10, i * 10 + 5, f"p{i}") for i in range(2)]
+    + [UNPLACEABLE]
+    + [("c1", i * 10, i * 10 + 5, f"p{i}") for i in range(2, 10)]
+)
+
+
+def test_regions_should_report_a_next_page_when_one_remains(make_bed):
+    """Test the next-page probe against a window holding an unplaceable row.
+
+    Given:
+        A BED of ten placeable records with an unplaceable one at index 2, and
+        a page of five requested from the start.
+    When:
+        The page is listed.
+    Then:
+        It should report that more follow. The probe reads ``limit + 1`` rows;
+        counting it after the unplaceable row is dropped makes a full page look
+        like a short one, and a client paging on ``has_next`` stops with five
+        records it was never shown.
+    """
+    # Arrange
+    tileset = BedTileset(make_bed(PAGED, name="paged.bed"), CHROMSIZES)
+
+    # Act
+    rows, has_next = tileset.regions(0, 5)
+
+    # Assert
+    assert len(rows) == 5
+    assert has_next is True
+
+
+def test_regions_should_not_repeat_a_record_across_consecutive_pages(
+    make_bed,
+):
+    """Test that the offset and the page range over the same population.
+
+    Given:
+        The same BED, listed as two consecutive pages of five.
+    When:
+        Both pages are listed.
+    Then:
+        They should share no record and together cover all ten placeable ones.
+        ``offset`` indexes rows in the file; filtering after the slice makes
+        the page a subset of that window, so the next offset lands short and
+        the pages overlap -- a listing that silently repeats entries.
+    """
+    # Arrange
+    tileset = BedTileset(make_bed(PAGED, name="paged.bed"), CHROMSIZES)
+
+    # Act
+    first, _ = tileset.regions(0, 5)
+    second, has_next = tileset.regions(5, 5)
+
+    # Assert
+    assert set(names(first)) & set(names(second)) == set()
+    assert sorted(names(first) + names(second)) == sorted(
+        r[3] for r in PAGED if r is not UNPLACEABLE
+    )
+    assert has_next is False
