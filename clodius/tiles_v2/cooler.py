@@ -562,7 +562,20 @@ class CoolerTileset(BaseTileset):
             **extras,
         )
 
-    def _tile(self, tid: TileId, reader: BlockReader):
+    def _tile(self, tid: TileId, reader: BlockReader | None = None):
+        """One tile's payload, from a reader opened for the whole batch.
+
+        Widens `BaseTileset._tile` rather than contradicting it. The reader is
+        genuinely required -- `tiles()` opens one per zoom and modifier and
+        shares it across that group -- but a signature that adds a *required*
+        parameter is not an implementation of the hook it appears to override.
+        """
+        if reader is None:
+            raise TypeError(
+                f"{type(self).__name__}._tile needs a reader; call tiles(), "
+                f"which opens one per batch"
+            )
+
         x, y = tid.pos
         canvas = reader.canvas
         binsize = canvas.binsize
