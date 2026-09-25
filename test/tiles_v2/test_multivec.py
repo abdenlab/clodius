@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 
 from clodius.core.policies import TilePolicy
+from clodius.core.errors import MalformedTileId
 from clodius.core.tileset import TilesetInfo
 from clodius.tiles_v2.multivec import MultivecTileset
 
@@ -84,6 +85,32 @@ def bare_mv5(tmp_path_factory):
 
 class TestMultivecTileset:
     """Serving a multivec whose info carries metadata the model never declared."""
+
+    def test_tiles_should_raise_when_an_option_is_not_recognized(
+        self, bare_mv5
+    ):
+        """Test an option key this tileset does not read.
+
+        Given:
+            A multivec tileset and a batch carrying an option it knows nothing
+            about.
+        When:
+            The batch is served.
+        Then:
+            It should raise ``MalformedTileId`` for the whole batch. This
+            class overrides ``tiles()`` to hoist its row-aggregation parsing,
+            so it does not inherit the base's refusal -- and the unrecognized
+            key was silently discarded, serving tiles that ignored the
+            request. Options arrive once for every tile, so this is a
+            whole-batch failure rather than a per-tile payload.
+        """
+        # Arrange
+        tileset = MultivecTileset(bare_mv5)
+        ids = [tileset.parse_tile_id("u.0.0")]
+
+        # Act & assert
+        with pytest.raises(MalformedTileId):
+            tileset.tiles(ids, {"bogus": 1})
 
     def test_info_should_carry_the_row_metadata(self, stateful_mv5):
         """Test the field that makes a state multivec readable.

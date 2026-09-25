@@ -230,6 +230,10 @@ AGG_FUNCS = {
     "max": np.amax,
 }
 
+#: The batch options this tileset reads. Distinct from ``options``, which
+#: declares the ``,key:value`` slot of a tile id -- a different channel.
+_ROW_AGG_KEYS = frozenset({"aggGroups", "aggFunc"})
+
 
 def parse_row_aggregation(options, n_rows: int):
     """Validate ``{"aggGroups", "aggFunc"}`` against a tileset of ``n_rows``.
@@ -240,6 +244,16 @@ def parse_row_aggregation(options, n_rows: int):
     """
     if not options:
         return None
+    # Refused rather than ignored, for the reason `BaseTileset.tiles` refuses
+    # what it cannot read: options arrive once for the whole batch, so serving
+    # tiles that quietly disregard what was asked for is the worse answer.
+    # This override is one of the two that bypass the base's own check.
+    unknown = set(options) - _ROW_AGG_KEYS
+    if unknown:
+        raise MalformedTileId(
+            f"unrecognized tile options {sorted(unknown)}; this tileset "
+            f"accepts {sorted(_ROW_AGG_KEYS)}"
+        )
     groups = options.get("aggGroups")
     func_name = options.get("aggFunc")
     if groups is None and func_name is None:

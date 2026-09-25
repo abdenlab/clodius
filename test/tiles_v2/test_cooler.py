@@ -18,7 +18,7 @@ committed multires cooler is a legacy implicit-ladder file with no
 import pytest
 
 from clodius.core.coords import Chromsizes
-from clodius.core.errors import UnsupportedOption
+from clodius.core.errors import TilesetError, UnsupportedOption
 from clodius.core.tileid import TileId
 from clodius.tiles_v2.cooler import CoolerTileset
 
@@ -106,6 +106,53 @@ def test_parse_tile_id_should_reject_an_option(symmetric_mcool):
     # Act & assert
     with pytest.raises(UnsupportedOption, match="bogus"):
         tileset.parse_tile_id("u.0.0.0,bogus:1")
+
+
+def test_tiles_should_raise_when_a_batch_option_is_passed(symmetric_mcool):
+    """Test the refusal an overriding tiles() does not inherit.
+
+    Given:
+        A cooler tileset, which declares it reads no tile options, and a batch
+        carrying one.
+    When:
+        The batch is served.
+    Then:
+        It should raise a ``TilesetError`` rather than serve. The protocol
+        makes a malformed option a whole-batch failure, since options arrive
+        once for every tile at once -- and this class overrides ``tiles()``,
+        so it does not inherit the base's check and silently served tiles that
+        ignored what was asked for. Distinct from the ``,key:value`` slot of a
+        tile id, which is a different channel and already covered.
+    """
+    # Arrange
+    tileset = CoolerTileset(symmetric_mcool)
+    ids = [tileset.parse_tile_id("u.0.0.0")]
+
+    # Act & assert
+    with pytest.raises(TilesetError):
+        tileset.tiles(ids, {"aggFunc": "mean"})
+
+
+def test_tiles_should_serve_the_batch_when_no_option_is_passed(symmetric_mcool):
+    """Test the control, so the refusal above cannot pass by refusing all.
+
+    Given:
+        The same tileset and no options.
+    When:
+        A batch is served.
+    Then:
+        It should return a payload for the tile.
+    """
+    # Arrange
+    tileset = CoolerTileset(symmetric_mcool)
+    ids = [tileset.parse_tile_id("u.0.0.0")]
+
+    # Act
+    served = tileset.tiles(ids)
+
+    # Assert
+    assert len(served) == 1
+    assert "error" not in served[0][1]
 
 
 def test_tiles_should_raise_when_the_file_cannot_be_opened():
