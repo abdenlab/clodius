@@ -1,9 +1,9 @@
 """Tests for clodius.core.policies.
 
-Only the two functions whose guards this branch restores: the record cap, and
-the digest the cap ranks on. The rest of the module -- ``TilePolicy``,
-``LinkPolicy``, ``reconcile``, ``reconcile_2d`` -- is covered when the full
-suite lands.
+The record cap, the digest it ranks on, and the limits object that carries
+both. ``LinkPolicy``, ``reconcile`` and ``reconcile_2d`` are still uncovered
+here -- ``reconcile`` in particular has no direct unit test anywhere, despite
+``conformance_test.py`` naming bin drift as the first bug class to watch.
 
 A cap is a safety limit, so its edges are the whole point: zero and ``None``
 sit next to each other in the signature and mean opposite things, and the
@@ -82,6 +82,69 @@ class TestTilePolicy:
 
         # Assert
         assert getattr(policy, field) == 0
+
+    def test___init___should_carry_the_shipped_limits_by_default(self):
+        """Test the ceilings every tileset gets when a caller names none.
+
+        Given:
+            A policy constructed with no arguments.
+        When:
+            Its limits are read.
+        Then:
+            It should serve at most 8192 records, refuse to scan an unindexed
+            file above 20 MB, and place no limit on a tile's span. These are
+            what every tileset in the package runs under unless told
+            otherwise, so a silent change to any of them changes what the
+            server returns everywhere at once.
+        """
+        # Act
+        policy = TilePolicy()
+
+        # Assert
+        assert policy.max_records == 8192
+        assert policy.max_scan_bytes == 20_000_000
+        assert policy.max_span is None
+
+    def test___setattr___should_raise_when_a_limit_is_assigned(self):
+        """Test the frozen claim the class docstring makes.
+
+        Given:
+            A constructed policy.
+        When:
+            One of its limits is assigned.
+        Then:
+            It should raise. A tileset holds its policy for its whole life and
+            several read it per tile, so a mutable one would let a caller
+            change the ceiling under a request already in flight.
+        """
+        # Arrange
+        policy = TilePolicy()
+
+        # Act & assert
+        with pytest.raises(Exception):
+            policy.max_records = 10
+
+    def test_with__should_return_a_copy_carrying_the_change(self):
+        """Test the supported way to derive a variant of a frozen policy.
+
+        Given:
+            A default policy.
+        When:
+            A copy is derived with a different cap.
+        Then:
+            The copy should carry the new cap and the original should be
+            unchanged. Only the raising path is covered otherwise, so nothing
+            says the method works.
+        """
+        # Arrange
+        policy = TilePolicy()
+
+        # Act
+        derived = policy.with_(max_records=10)
+
+        # Assert
+        assert derived.max_records == 10
+        assert policy.max_records == 8192
 
     def test_with__should_raise_when_the_change_is_negative(self):
         """Test that deriving a policy re-validates rather than bypassing.

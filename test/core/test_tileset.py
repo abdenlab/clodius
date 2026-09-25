@@ -20,7 +20,13 @@ from clodius.core.errors import (
     UnsupportedOption,
 )
 from clodius.core.tileid import ModifierSpec
-from clodius.core.tileset import BaseTileset, DatasetInfo, TilesetInfo
+from clodius.core.policies import TilePolicy
+from clodius.core.tileset import (
+    BaseTileset,
+    DatasetInfo,
+    Tileset,
+    TilesetInfo,
+)
 
 CHROMSIZES = Chromsizes.from_pairs([("c1", 100), ("c2", 200)])
 
@@ -222,6 +228,46 @@ class TestBaseTileset:
             tileset.parse_tile_id("abc.3.4")
 
 
+class TestTileset:
+    """The runtime-checkable protocol, and what declaring `ndim` buys."""
+
+    def test___instancecheck___should_reject_a_tileset_with_no_arity(self):
+        """Test the check that justifies leaving `ndim` unassigned.
+
+        Given:
+            Two tilesets alike in every published attribute except that one
+            declares no ``ndim``.
+        When:
+            Each is tested against the ``Tileset`` protocol.
+        Then:
+            Only the complete one should pass. The protocol is
+            runtime-checkable, so the test is for the attribute's presence --
+            which is exactly why ``BaseTileset`` annotates ``ndim`` without
+            assigning it. Giving the base an inherited default would flip the
+            incomplete tileset to ``True`` and make the protocol lie about a
+            tileset that cannot parse an id.
+        """
+        # Arrange. `NoArity` is the parent so that `ndim` is genuinely absent
+        # rather than deleted from a subclass, which would still find it on
+        # the base and make the assertion vacuous.
+        class NoArity(BaseTileset):
+            datatype = "bedlike"
+
+            def __init__(self):
+                self.policy = TilePolicy()
+                self.tile_size = 256
+
+            def info(self):
+                return TilesetInfo.quadtree(CHROMSIZES, 256)
+
+        class Complete(NoArity):
+            ndim = 1
+
+        # Act & assert
+        assert isinstance(Complete(), Tileset)
+        assert not isinstance(NoArity(), Tileset)
+
+
 class TestTilesetInfo:
     """The served description of a tileset, and its immutability."""
 
@@ -287,8 +333,11 @@ class TestTilesetInfo:
         """Test that deriving a variant does not launder mutability back in.
 
         Given:
-            A copy taken with ``model_copy(update=...)``, the documented way to
-            derive a variant and the one the bigwig path uses.
+            A copy taken with ``model_copy(update=...)``. This is the pydantic
+            route, not the supported one -- ``with_`` is what the model
+            documents and what the bigwig path now uses -- and the point here
+            is that even the unsupported route must not hand back something
+            mutable.
         When:
             A field is assigned on the copy.
         Then:
@@ -386,6 +435,26 @@ class TestBaseTilesetTiles:
         with pytest.raises(TilesetError):
             tileset.tiles(ids, {"aggregation": "mean"})
 
+    def test___exit___should_close_without_swallowing_an_exception(self):
+        """Test the context manager against a body that raises.
+
+        Given:
+            A tileset used as a context manager, whose block raises.
+        When:
+            The block exits.
+        Then:
+            The exception should propagate and the tileset should still have
+            been closed. An ``__exit__`` returning anything truthy silently
+            swallows every error raised inside every caller's ``with`` block.
+        """
+        # Arrange
+        tileset = ClosedTileset()
+
+        # Act & assert
+        with pytest.raises(RuntimeError, match="boom"):
+            with tileset:
+                raise RuntimeError("boom")
+
     def test_tiles_should_return_a_refusal_as_that_tiles_payload(self):
         """Test that one refusal does not take the batch down with it.
 
@@ -479,6 +548,26 @@ class TestDatasetInfo:
         assert derived.max_pos == [200]
         assert info.max_pos == [100]
 
+    def test___hash___should_not_be_advertised(self):
+        """Test the base's own hashability, not just the subclass's.
+
+        Given:
+            A ``DatasetInfo``, whose position fields are lists.
+        When:
+            It is used where a hash is required.
+        Then:
+            It should raise ``TypeError``. ``TilesetInfo`` restates
+            ``__hash__ = None`` precisely because pydantic re-synthesizes a
+            hash for every frozen model, so the base needs its own assertion
+            or nothing catches its removal.
+        """
+        # Arrange
+        info = DatasetInfo(min_pos=[0], max_pos=[100])
+
+        # Act & assert
+        with pytest.raises(TypeError):
+            {info}
+
     def test_with__should_raise_when_the_change_is_invalid(self):
         """Test the validation ``model_copy`` skips.
 
@@ -529,6 +618,48 @@ class TestTilesetInfoDerivation:
 
         # Assert
         assert derived.coordinate_system.names == ("c2", "c1")
+
+    def test_with__should_keep_a_field_the_model_does_not_declare(self):
+        """Test that deriving a variant does not strip a type's own info keys.
+
+        Given:
+            An info carrying an undeclared field, as cooler's ``mirror_tiles``
+            and multivec's row metadata both do.
+        When:
+            A variant is derived with ``with_``.
+        Then:
+            The extra should survive. ``with_`` round-trips through a dump, so
+            a change there would silently drop every type-specific key from
+            any derived info -- and the bigwig path derives one per tileset.
+        """
+        # Arrange
+        info = TilesetInfo.quadtree(CHROMSIZES, 256, mirror_tiles=False)
+
+        # Act
+        derived = info.with_(max_pos=[info.max_width])
+
+        # Assert
+        assert derived.to_dict()["mirror_tiles"] is False
+
+    def test_with__should_raise_when_the_change_breaks_the_ladder(self):
+        """Test that the derive path re-runs the whole-model validator.
+
+        Given:
+            A quadtree info whose extent is its tile size times two to the max
+            zoom.
+        When:
+            A variant is derived with a tile size that breaks that identity.
+        Then:
+            It should raise. The existing coverage only shows ``with_``
+            running the per-field validators; this is the model-level one,
+            which is the check ``model_copy`` skips entirely.
+        """
+        # Arrange
+        info = TilesetInfo.quadtree(CHROMSIZES, 256)
+
+        # Act & assert
+        with pytest.raises(ValidationError):
+            info.with_(tile_size=128)
 
     def test___hash___should_not_be_advertised(self):
         """Test that the type does not claim a capability no instance has.
