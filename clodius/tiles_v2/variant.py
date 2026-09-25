@@ -19,6 +19,7 @@ from clodius.core.policies import (
 from clodius.core.tileid import TileId
 from clodius.core.tileset import BaseTileset, TilesetInfo
 from clodius.tiles_v2._exprs import known_chroms
+from clodius.tiles_v2._index import indexed_contigs, screen_regions
 
 TILE_SIZE = 1024
 HASH_SEED = 0x1F4B_5C0D
@@ -222,6 +223,12 @@ class VariantTileset(BaseTileset):
             )
         self._chromsizes = chromsizes
         self._known_chroms = known_chroms(chromsizes, "chrom")
+        # What the index can be asked for; see `clodius.tiles_v2._index`.
+        self._index_contigs = (
+            indexed_contigs(self._path, self._index_path)
+            if self._is_indexed
+            else None
+        )
         self._info = self._build_info()
 
     def chromsizes(self) -> Chromsizes:
@@ -354,7 +361,13 @@ class VariantTileset(BaseTileset):
             return []
 
         if self._is_indexed:
-            frame = self._frame([_region(gr) for gr in ranges])
+            # A contig the index does not carry has no variants, so this
+            # only drops queries that would have raised out of the reader
+            # as a ComputeError and failed the whole batch.
+            seekable = screen_regions(ranges, self._index_contigs)
+            if not seekable:
+                return []
+            frame = self._frame([_region(gr) for gr in seekable])
         else:
             self._check_scannable()
             frame = self._frame(None).filter(overlap_predicate(ranges))

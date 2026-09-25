@@ -26,6 +26,7 @@ import pytest
 
 from clodius.core.coords import Chromsizes
 from clodius.core.errors import TilesetUnavailable
+from clodius.core.policies import LinkPolicy
 from clodius.core.policies import TilePolicy
 from clodius.tiles_v2.bedpe import (
     BedpeLinksTileset,
@@ -281,6 +282,43 @@ class TestBedpeLinksTileset:
 
         # Assert
         assert records == []
+
+    def test_tiles_should_serve_an_indexed_file_missing_a_contig(
+        self, make_bedpe, make_indexed_bedpe
+    ):
+        """Test an index that does not carry every contig the tile asks for.
+
+        Given:
+            A BEDPE whose pairs all sit on one contig, served against
+            chromsizes naming two, written both plain and as BGZF+tabix.
+        When:
+            The whole-genome tile is served from each.
+        Then:
+            Both should return the same links. The seek list is built from the
+            chromsizes, so the indexed path named a contig the index does not
+            carry and the reader raised past the per-tile boundary.
+        """
+        # Arrange
+        indexed = BedpeLinksTileset(
+            make_indexed_bedpe(RECORDS, name="c1only.bedpe"),
+            CHROMSIZES,
+            link_policy=LinkPolicy.BOTH,
+            tile_size=TILE_SIZE,
+        )
+        scanning = BedpeLinksTileset(
+            make_bedpe(RECORDS, name="c1plain.bedpe"),
+            CHROMSIZES,
+            link_policy=LinkPolicy.BOTH,
+            tile_size=TILE_SIZE,
+        )
+
+        # Act
+        (_, from_index), = indexed.tiles([indexed.parse_tile_id("u.0.0")])
+        (_, from_scan), = scanning.tiles([scanning.parse_tile_id("u.0.0")])
+
+        # Assert
+        assert names(from_index) == names(from_scan)
+        assert from_index
 
     def test_tiles_should_serve_an_indexed_file_above_the_scan_ceiling(
         self, make_indexed_bedpe

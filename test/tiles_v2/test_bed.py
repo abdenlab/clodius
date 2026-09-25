@@ -46,6 +46,14 @@ RECORDS = [
 #: A contig the chromsizes above do not name.
 UNPLACEABLE = ("cUNKNOWN", 0, 10, "z")
 
+# Every contig in CHROMSIZES carries a record above, and that is load-bearing
+# for the indexed tests rather than incidental: a tabix index lists only the
+# contigs it saw, so a fixture that left one empty would make every indexed
+# whole-genome tile ask for a contig the index has never heard of. That used
+# to raise a ComputeError out of the reader and fail the whole batch; it is
+# screened now (see `clodius.tiles_v2._index`) and pinned by
+# `test_tiles_should_serve_an_indexed_file_missing_a_contig` below.
+
 
 def write_bed(path, records):
     """Write records to a plain BED and return its path."""
@@ -293,6 +301,39 @@ def test_regions_should_skip_a_record_on_an_unknown_contig(make_bed):
     # Assert
     assert len(rows) == len(RECORDS)
     assert all(r["fields"][0] != "cUNKNOWN" for r in rows)
+
+
+def test_tiles_should_serve_an_indexed_file_missing_a_contig(
+    make_bed, make_bed_bgzf
+):
+    """Test an index that has never heard of a contig the tile asks for.
+
+    Given:
+        A BED whose records all sit on one contig, served against chromsizes
+        naming three, written both plain and as BGZF+tabix.
+    When:
+        The whole-genome tile is served from each.
+    Then:
+        Both should return the same records. Query regions come from the
+        chromsizes, but a tabix index lists only the contigs it saw, so the
+        indexed path asked for two contigs the index does not carry. That
+        raised out of the reader as a ``ComputeError`` -- not a ``TileError``,
+        so the per-tile boundary could not render it and one routine tile
+        failed the whole batch. A single-chromosome BED served against a whole
+        assembly is ordinary input, not an edge case.
+    """
+    # Arrange
+    c1_only = [r for r in RECORDS if r[0] == "c1"]
+    indexed = BedTileset(make_bed_bgzf(c1_only, name="c1only.bed"), CHROMSIZES)
+    scanning = BedTileset(make_bed(c1_only, name="c1plain.bed"), CHROMSIZES)
+
+    # Act
+    (_, from_index), = indexed.tiles([indexed.parse_tile_id("u.0.0")])
+    (_, from_scan), = scanning.tiles([scanning.parse_tile_id("u.0.0")])
+
+    # Assert
+    assert names(from_index) == names(from_scan)
+    assert from_index
 
 
 @pytest.mark.parametrize("indexed", [False, True])

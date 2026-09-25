@@ -13,6 +13,7 @@ from clodius.core.policies import TilePolicy, LinkPolicy
 from clodius.core.tileid import TileId
 from clodius.core.tileset import BaseTileset, TilesetInfo
 from clodius.tiles_v2._exprs import known_chroms
+from clodius.tiles_v2._index import indexed_contigs, screen_regions
 
 TILE_SIZE = 1024
 
@@ -161,6 +162,12 @@ class _BedpeBase(BaseTileset):
         )
         self._chromsizes = chromsizes
         self._known_chroms = known_chroms(chromsizes, "chrom", "chrom2")
+        # What the index can be asked for; see `clodius.tiles_v2._index`.
+        self._index_contigs = (
+            indexed_contigs(self._path, self._index_path)
+            if self._is_indexed
+            else None
+        )
         self.policy = policy or TilePolicy()
         self.tile_size = tile_size
         self._info = self._build_info()
@@ -283,6 +290,14 @@ class _BedpeBase(BaseTileset):
             return []
 
         predicate, seek_to = self._select(axes)
+        if seek_to is not None and self._is_indexed:
+            # Only the seeking policies reach this. A contig absent from
+            # the index has no records, so an empty screen is an empty
+            # tile -- and querying it would raise past the per-tile
+            # boundary as a ComputeError.
+            seek_to = screen_regions(seek_to, self._index_contigs)
+            if not seek_to:
+                return []
 
         offsets = self._chromsizes.offsets
         frame = (

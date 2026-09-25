@@ -21,6 +21,7 @@ Fixtures are synthesized into a temp directory, so the module runs on a
 checkout with no git-LFS payload.
 """
 
+import pysam
 import pytest
 
 from clodius.core.coords import Chromsizes
@@ -41,11 +42,11 @@ VARIANTS = (
 )
 
 
-def write_vcf(path, variants):
+def write_vcf(path, variants, contigs=None):
     """Write a minimal VCF carrying ``variants`` and return its path."""
     with open(path, "w") as fh:
         fh.write("##fileformat=VCFv4.2\n")
-        for name, length in HEADER_CONTIGS:
+        for name, length in contigs or HEADER_CONTIGS:
             fh.write(f"##contig=<ID={name},length={length}>\n")
         fh.write("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
         for chrom, pos, name in variants:
@@ -57,8 +58,22 @@ def write_vcf(path, variants):
 def make_vcf(tmp_path):
     """Build a plain VCF, so every tile scans the file."""
 
-    def build(variants=VARIANTS, name="variants.vcf"):
-        return write_vcf(tmp_path / name, variants)
+    def build(variants=VARIANTS, name="variants.vcf", contigs=None):
+        return write_vcf(tmp_path / name, variants, contigs)
+
+    return build
+
+
+@pytest.fixture
+def make_indexed_vcf(tmp_path):
+    """Build a BGZF-compressed, tabix-indexed VCF and return its path."""
+
+    def build(variants=VARIANTS, name="variants.vcf", contigs=None):
+        plain = write_vcf(tmp_path / name, variants, contigs)
+        gz = plain + ".gz"
+        pysam.tabix_compress(plain, gz, force=True)
+        pysam.tabix_index(gz, preset="vcf", force=True)
+        return gz
 
     return build
 
@@ -159,6 +174,47 @@ class TestVariantTileset:
         # Assert
         assert "z" not in names(records)
         assert records
+
+    def test_tiles_should_serve_an_indexed_file_missing_a_contig(
+        self, make_vcf, make_indexed_vcf
+    ):
+        """Test an index that does not name every contig in the chromsizes.
+
+        Given:
+            A VCF declaring two contigs but carrying variants on ``c1`` only,
+            written both plain and as BGZF+tabix, served against chromsizes
+            naming both.
+        When:
+            The whole-genome tile is served from each.
+        Then:
+            Both should return the same variants. Query regions are derived
+            from the chromsizes, so the indexed path asked the index for a
+            contig it does not carry; the reader raised a ``ComputeError``,
+            which is not a ``TileError``, so one ordinary tile failed the
+            entire batch.
+        """
+        # Arrange. The index lists only contigs it saw records on, so `c2`
+        # must be in the chromsizes and absent from the data for the tile to
+        # ask for something the index cannot answer.
+        two_contigs = [("c1", 1000), ("c2", 1500)]
+        both = Chromsizes.from_pairs(two_contigs)
+        c1_only = [v for v in VARIANTS if v[0] == "c1"]
+        indexed = VcfTileset(
+            make_indexed_vcf(c1_only, name="c1only.vcf", contigs=two_contigs),
+            chromsizes=both,
+        )
+        scanning = VcfTileset(
+            make_vcf(c1_only, name="c1plain.vcf", contigs=two_contigs),
+            chromsizes=both,
+        )
+
+        # Act
+        (_, from_index), = indexed.tiles([indexed.parse_tile_id("u.0.0")])
+        (_, from_scan), = scanning.tiles([scanning.parse_tile_id("u.0.0")])
+
+        # Assert
+        assert names(from_index) == names(from_scan)
+        assert from_index
 
     @pytest.mark.parametrize("cap,expected", [(0, 0), (3, 3), (None, 10)])
     def test_tiles_should_return_at_most_the_capped_number_of_records(

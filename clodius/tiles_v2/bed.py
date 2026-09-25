@@ -13,6 +13,7 @@ from clodius.core.policies import TilePolicy
 from clodius.core.tileid import TileId
 from clodius.core.tileset import BaseTileset, TilesetInfo
 from clodius.tiles_v2._exprs import known_chroms
+from clodius.tiles_v2._index import indexed_contigs, screen_regions
 
 TILE_SIZE = 1024
 
@@ -163,6 +164,14 @@ class BedTileset(BaseTileset):
         self.tile_size = tile_size
         self._chromsizes = chromsizes
         self._known_chroms = known_chroms(chromsizes, "chrom")
+        # Read once, like `_known_chroms`: what the index can be asked for,
+        # which is not the same set as the chromsizes a region is derived
+        # from. See `clodius.tiles_v2._index`.
+        self._index_contigs = (
+            indexed_contigs(self._path, self._index_path)
+            if self._is_indexed
+            else None
+        )
         self._info = self._build_info()
         self._checked_size = False
 
@@ -280,7 +289,14 @@ class BedTileset(BaseTileset):
             return []
 
         if self._is_indexed:
-            frame = self._scan([gr.to_ucsc(coords="01") for gr in in_bounds])
+            # A contig the index does not carry has no records, so dropping
+            # it changes nothing -- except that asking for it raises out of
+            # the reader as a ComputeError, which is not a TileError and so
+            # fails the whole batch rather than this tile.
+            seekable = screen_regions(in_bounds, self._index_contigs)
+            if not seekable:
+                return []
+            frame = self._scan([gr.to_ucsc(coords="01") for gr in seekable])
         else:
             frame = self._scan()
             predicate = overlap_predicate(ranges, self._chromsizes)
