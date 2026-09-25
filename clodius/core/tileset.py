@@ -11,6 +11,7 @@ from clodius.core.tile import AnnotationRecord, TileKind
 from clodius.core.policies import TilePolicy
 from clodius.core.tileid import ModifierSpec, TileId
 from clodius.core.errors import (
+    TileError,
     TileOutOfBounds,
     TilesetUnavailable,
 )
@@ -140,6 +141,32 @@ class BaseTileset:
 
     tile_size: int
     policy: TilePolicy
+
+    def tiles(
+        self, ids: Sequence[TileId], options=None
+    ) -> list[tuple[TileId, TileKind]]:
+        """One entry per requested id, always.
+
+        The per-tile boundary `clodius.core.errors` describes, in one place.
+        A refusal lands in that tile's payload slot rather than aborting the
+        batch. Only errors that are genuinely per-tile are caught -- an
+        unreadable file still raises, because retrying the other fifteen tiles
+        against it is pointless.
+
+        A tileset whose `_tile` needs more than a tile id -- a batch-wide
+        option, a shared reader -- overrides this; every other one inherits it.
+        """
+        out = []
+        for tid in ids:
+            try:
+                out.append((tid, self._tile(tid)))
+            except TileError as exc:
+                out.append((tid, exc.to_dict()))
+        return out
+
+    def _tile(self, tid: TileId) -> TileKind:
+        """One tile's payload, or raise a `TileError` refusing it."""
+        raise NotImplementedError
 
     def parse_tile_id(self, tile_id: str) -> TileId:
         """Parse against this tileset's declared shape."""
