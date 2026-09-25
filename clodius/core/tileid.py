@@ -34,13 +34,17 @@ def _is_int(text: str) -> bool:
     naming the problem, rather than falling through to the modifier slot.
 
     ASCII decimal digits only, which is narrower than both of the obvious
-    spellings. ``int`` would accept ``+5`` and ``1_0`` -- two id strings for
-    one tile, echoed back under the key the client sent. ``str.isdigit`` is
-    the opposite error: it admits superscripts, which ``int`` then rejects
-    with a bare ``ValueError`` that is not a
-    :class:`~clodius.core.errors.TilesetError` and escapes the server
-    boundary as a 500. ``str.isdecimal`` still admits fullwidth digits, where
-    ``int`` succeeds and ``abc.3.１`` silently denotes tile 1.
+    spellings. ``int`` would accept ``+5`` and ``1_0``; ``str.isdigit`` is the
+    opposite error, admitting superscripts that ``int`` then rejects with a
+    bare ``ValueError`` -- not a
+    :class:`~clodius.core.errors.TilesetError`, so it escapes the server
+    boundary as a 500; and ``str.isdecimal`` alone still admits fullwidth
+    digits, where ``int`` succeeds and ``abc.3.１`` silently denotes tile 1.
+
+    This does not close every alias: ``abc.-0.0``, ``abc.00.007`` and
+    ``abc.0.0`` still denote one tile under three ids. The answer is correct
+    either way, since ``raw`` is echoed back verbatim; only the cache key
+    duplicates.
     """
     return text.isascii() and (
         text.isdecimal() or (text[:1] == "-" and text[1:].isdecimal())

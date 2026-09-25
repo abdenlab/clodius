@@ -264,8 +264,10 @@ def stable_importance(key: str) -> float:
     - the ranking is identical at every zoom, so a feature that survives
       thinning at one level survives at the next, instead of flickering.
 
-    Uses the same digest the record's ``uid`` already comes from, so no new
-    hashing is introduced.
+    Takes a second digest, of the key it is handed. Callers that pass a uid
+    which is itself a hexdigest therefore hash twice; slicing the caller's
+    digest instead would be cheaper but would change every importance value,
+    and so which records survive thinning.
     """
     # `usedforsecurity=False` marks this as a bucketing hash rather than a
     # security primitive, so it keeps working on a FIPS-enforcing build where
