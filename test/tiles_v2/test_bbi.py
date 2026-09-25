@@ -1,14 +1,22 @@
 """Tests for clodius.tiles_v2.bbi.
 
-One module serving bigWig and bigBed through three classes: shared plumbing,
-a signal tileset emitting dense vectors, and an annotation tileset emitting
-records. Both concrete classes derive their info the same way -- build a
-quadtree over the chromsizes, then pad ``max_pos`` out to the quadtree extent
-so the client's axis matches the grid the tiles are cut from.
+One module serving bigWig and bigBed through four concrete tilesets that share
+a single info builder: a signal tileset emitting dense vectors, an annotation
+tileset emitting records, and the two bigInteract tilesets -- links, which is
+one-dimensional, and rectangles, which is not. All four derive their info the
+same way: build a quadtree over the chromsizes, then pad ``max_pos`` out to the
+quadtree extent so the client's axis matches the grid the tiles are cut from.
 
-That padding is the part under test here. It is applied by deriving a variant
-of the info, and the served info is the only place a broken derivation becomes
-visible -- nothing looked at it before.
+That padding is the part under test here, in both of its dimensions. It is
+applied by deriving a variant of the info, and the served info is the only
+place a broken derivation becomes visible -- nothing looked at it before.
+
+How many entries it pads matters as much as the value. ``min_pos`` and
+``max_pos`` are per-axis on the wire, so a two-dimensional tileset that
+publishes one of each leaves a 2D track with no second axis to lay out. The
+arity is the only thing the shared builder takes from its subclass, and
+``canvas()`` derives its extent from the scalar ``max_width``, so a wrong
+arity is invisible everywhere except the served info.
 
 The fixtures are synthesized with pybigtools in milliseconds. Note that the
 chromsizes go to ``write``, not to ``open`` -- the wrapper's ``open`` takes
@@ -23,7 +31,12 @@ import pybigtools
 import pytest
 
 from clodius.core.policies import TilePolicy
-from clodius.tiles_v2.bbi import BBIAnnotationTileset, BBISignalTileset
+from clodius.tiles_v2.bbi import (
+    BBIAnnotationTileset,
+    BBIInteraction2DTileset,
+    BBIInteractionLinksTileset,
+    BBISignalTileset,
+)
 
 #: Totals 3000 bp, which a four-bin tile size covers with a quadtree extent of
 #: 4096 -- so the padded `max_pos` is distinguishable from the genome length.
@@ -62,6 +75,65 @@ def bigbed(tmp_path_factory):
                 ("c1", 10, 20, "a\t100"),
                 ("c1", 300, 400, "b\t200"),
                 ("c2", 50, 60, "c\t300"),
+            ]
+        ),
+    )
+    return path
+
+
+def interact_record(name, source, target):
+    """One bed5+13 interact row, as the tab-joined rest of a bigBed record.
+
+    The hull is the record's own start and end; the anchors live in the custom
+    fields, which is what makes this schema worth a fixture of its own.
+    """
+    source_chrom, source_start, source_end = source
+    target_chrom, target_start, target_end = target
+    return "\t".join(
+        [
+            name,
+            "0",
+            "+",
+            "hg38",
+            "0",
+            source_chrom,
+            str(source_start),
+            str(source_end),
+            "0,0,0",
+            target_chrom,
+            str(target_start),
+            str(target_end),
+            "0,0,0",
+        ]
+    )
+
+
+@pytest.fixture(scope="module")
+def bigInteract(tmp_path_factory):
+    """A bed5+13 bigBed holding one interaction per contig."""
+    path = str(tmp_path_factory.mktemp("bbi") / "interact.bb")
+    pybigtools.open(path, "w").write(
+        CHROMSIZES,
+        iter(
+            [
+                (
+                    "c1",
+                    10,
+                    900,
+                    interact_record("a", ("c1", 10, 60), ("c1", 850, 900)),
+                ),
+                (
+                    "c2",
+                    20,
+                    700,
+                    interact_record("b", ("c2", 20, 70), ("c2", 650, 700)),
+                ),
+                (
+                    "c3",
+                    5,
+                    400,
+                    interact_record("c", ("c3", 5, 40), ("c3", 360, 400)),
+                ),
             ]
         ),
     )
@@ -271,3 +343,126 @@ def test_tiles_should_digest_a_record_without_requiring_md5_for_security(
 
     # Assert
     assert len(records) == 3
+
+
+def test_info_should_return_one_position_per_axis_for_a_2d_tileset(
+    bigInteract,
+):
+    """Test the arity of the info a two-dimensional tileset serves.
+
+    Given:
+        A bigInteract served as 2D rectangles, which declares ``ndim = 2``.
+    When:
+        Its info is requested.
+    Then:
+        ``min_pos`` and ``max_pos`` should each carry two entries. The client
+        reads the y extent from ``max_pos[1]``, so a one-entry list leaves a
+        2D track with no second axis to lay out -- and nothing in the serving
+        path reads these fields, so the served info is the only place the
+        mistake is visible.
+    """
+    # Arrange
+    tileset = BBIInteraction2DTileset(bigInteract, tile_size=TILE_SIZE)
+
+    # Act
+    served = tileset.info().to_dict()
+
+    # Assert
+    assert served["min_pos"] == [0, 0]
+    assert served["max_pos"] == [QUADTREE_EXTENT, QUADTREE_EXTENT]
+
+
+@pytest.mark.parametrize(
+    "cls,fixture",
+    [
+        (BBISignalTileset, "bigwig"),
+        (BBIAnnotationTileset, "bigbed"),
+        (BBIInteractionLinksTileset, "bigInteract"),
+    ],
+    ids=["signal", "annotation", "links"],
+)
+def test_info_should_return_a_single_position_for_a_1d_tileset(
+    cls, fixture, request
+):
+    """Test that the per-axis padding did not widen the 1D types.
+
+    Given:
+        Each of the three tilesets that declare ``ndim = 1``.
+    When:
+        Info is requested.
+    Then:
+        ``min_pos`` and ``max_pos`` should each carry exactly one entry.
+        Without this the 2D test above passes just as well against a build
+        that pads every tileset to two axes, which would misdescribe three
+        types to fix one.
+    """
+    # Arrange
+    tileset = cls(request.getfixturevalue(fixture), tile_size=TILE_SIZE)
+
+    # Act
+    served = tileset.info().to_dict()
+
+    # Assert
+    assert served["min_pos"] == [0]
+    assert served["max_pos"] == [QUADTREE_EXTENT]
+
+
+@pytest.mark.parametrize(
+    "cls,fixture",
+    [
+        (BBISignalTileset, "bigwig"),
+        (BBIAnnotationTileset, "bigbed"),
+        (BBIInteractionLinksTileset, "bigInteract"),
+        (BBIInteraction2DTileset, "bigInteract"),
+    ],
+    ids=["signal", "annotation", "links", "interaction2d"],
+)
+def test_info_should_describe_as_many_axes_as_the_tileset_declares(
+    cls, fixture, request
+):
+    """Test the invariant the four tilesets share, rather than four constants.
+
+    Given:
+        Each concrete tileset in the module, whatever arity it declares.
+    When:
+        Info is requested.
+    Then:
+        ``min_pos`` and ``max_pos`` should both be as long as ``ndim``. The
+        two tests above pin the arities the module has today; this one pins
+        the rule, so a fifth tileset added later cannot quietly inherit the
+        wrong shape.
+    """
+    # Arrange
+    tileset = cls(request.getfixturevalue(fixture), tile_size=TILE_SIZE)
+
+    # Act
+    served = tileset.info().to_dict()
+
+    # Assert
+    assert len(served["min_pos"]) == cls.ndim
+    assert len(served["max_pos"]) == cls.ndim
+
+
+def test_info_should_pad_every_axis_to_the_quadtree_extent(bigInteract):
+    """Test what each axis is padded *to*, not just how many there are.
+
+    Given:
+        A 2D tileset over a genome of 3000 bp, whose quadtree extent is 4096.
+    When:
+        Its info is requested.
+    Then:
+        Both ``max_pos`` entries should equal ``max_width`` rather than the
+        genome length. The client's axis has to match the grid the tiles are
+        cut from, and a fix that padded per axis with the genome total would
+        satisfy the arity tests above while moving both axes to the wrong
+        place.
+    """
+    # Arrange
+    tileset = BBIInteraction2DTileset(bigInteract, tile_size=TILE_SIZE)
+
+    # Act
+    served = tileset.info().to_dict()
+
+    # Assert
+    assert served["max_pos"] == [served["max_width"]] * 2
+    assert served["max_width"] == QUADTREE_EXTENT > sum(CHROMSIZES.values())
