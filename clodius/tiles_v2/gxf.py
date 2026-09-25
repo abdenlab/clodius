@@ -584,6 +584,13 @@ class GxfTileset(BaseTileset):
         cap = self.policy.max_records
         if cap is None:
             return rows
+        # Stated before the comparison below, which would otherwise read an
+        # empty `spans` as "under the cap" and serve the tile unthinned. A
+        # tile whose rows carry no gene- or pseudogene-typed feature -- only
+        # exons and CDS, common outside GENCODE -- has exactly that shape, so
+        # a server configured to serve no records would emit an unbounded one.
+        if cap <= 0:
+            return []
 
         spans: dict[str, int] = {}
         for row in rows:
