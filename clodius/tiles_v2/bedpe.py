@@ -222,7 +222,16 @@ class _BedpeBase(BaseTileset):
         ).hash(seed=HASH_SEED)
 
     def _check_scannable(self) -> None:
-        if self._checked_size:
+        """Refuse to scan an unindexed file above the policy ceiling.
+
+        The `_is_indexed` arm is load-bearing rather than an optimization.
+        `BedpeLinksTileset._select` returns no seek for `LinkPolicy.EITHER` --
+        the default -- so an indexed file reaches this on every in-bounds tile,
+        and without the early return a perfectly well-indexed file above the
+        ceiling is refused with a message saying it is not indexed. Same guard
+        bed.py and variant.py apply, for the same reason.
+        """
+        if self._is_indexed or self._checked_size:
             return
         limit = self.policy.max_scan_bytes
         size = os.path.getsize(self._path)

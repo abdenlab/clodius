@@ -19,9 +19,13 @@ The fixtures are synthesized into a temp directory, so the module runs on a
 checkout with no git-LFS payload.
 """
 
+import os
+
+import pysam
 import pytest
 
 from clodius.core.coords import Chromsizes
+from clodius.core.errors import TilesetUnavailable
 from clodius.core.policies import TilePolicy
 from clodius.tiles_v2.bedpe import (
     BedpeLinksTileset,
@@ -64,6 +68,20 @@ def make_bedpe(tmp_path):
 
     def build(records=RECORDS, name="pairs.bedpe"):
         return write_bedpe(tmp_path / name, records)
+
+    return build
+
+
+@pytest.fixture
+def make_indexed_bedpe(tmp_path):
+    """Build a BGZF-compressed, tabix-indexed BEDPE and return its path."""
+
+    def build(records=RECORDS, name="pairs.bedpe"):
+        plain = write_bedpe(tmp_path / name, records)
+        gz = plain + ".gz"
+        pysam.tabix_compress(plain, gz, force=True)
+        pysam.tabix_index(gz, preset="bed", force=True)
+        return gz
 
     return build
 
@@ -263,6 +281,68 @@ class TestBedpeLinksTileset:
 
         # Assert
         assert records == []
+
+    def test_tiles_should_serve_an_indexed_file_above_the_scan_ceiling(
+        self, make_indexed_bedpe
+    ):
+        """Test the ceiling against a file that does not need scanning.
+
+        Given:
+            A BGZF-compressed, tabix-indexed BEDPE larger than the policy's
+            scan ceiling, served under the default link policy.
+        When:
+            An in-bounds tile is served.
+        Then:
+            It should return the links in view. The default policy seeks
+            nowhere -- either anchor may match -- so every in-bounds tile
+            reached the ceiling, and an indexed file was refused with a message
+            saying it must be indexed. ``TilesetUnavailable`` is a sibling of
+            ``TileError``, not a subclass, so that refusal failed the whole
+            batch rather than one tile.
+        """
+        # Arrange
+        path = make_indexed_bedpe()
+        assert os.path.getsize(path) > 100
+        tileset = BedpeLinksTileset(
+            path,
+            CHROMSIZES,
+            policy=TilePolicy(max_scan_bytes=100),
+            tile_size=TILE_SIZE,
+        )
+
+        # Act
+        (_, records), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+        # Assert
+        assert names(records) == ["r0", "r1", "r2", "r3"]
+
+    def test_tiles_should_refuse_an_unindexed_file_above_the_scan_ceiling(
+        self, make_bedpe
+    ):
+        """Test the control, so the case above does not disable the ceiling.
+
+        Given:
+            A plain BEDPE larger than the policy's scan ceiling.
+        When:
+            An in-bounds tile is served.
+        Then:
+            It should raise ``TilesetUnavailable``. Scanning is the cost the
+            ceiling exists to refuse, and an unindexed file leaves no other
+            way to read it.
+        """
+        # Arrange
+        path = make_bedpe()
+        assert os.path.getsize(path) > 50
+        tileset = BedpeLinksTileset(
+            path,
+            CHROMSIZES,
+            policy=TilePolicy(max_scan_bytes=50),
+            tile_size=TILE_SIZE,
+        )
+
+        # Act & assert
+        with pytest.raises(TilesetUnavailable):
+            tileset.tiles([tileset.parse_tile_id("u.0.0")])
 
     def test_tiles_should_return_the_links_in_view(self, make_bedpe):
         """Test the ordinary tile, so the screen cannot pass by emptying all.
