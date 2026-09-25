@@ -336,8 +336,29 @@ class TileCanvas:
         """Tiles needed to cover the canvas at this zoom."""
         return math.ceil(self.n_bins / self.tile_size)
 
+    def _check_pos(self, x: int) -> None:
+        """Raise unless tile ``x`` exists at this zoom."""
+        if x < 0 or x >= self.n_tiles:
+            raise TileOutOfBounds(
+                f"tile position {x} is outside the {self.n_tiles} tiles at "
+                f"zoom {self.z}"
+            )
+
     def tile_span(self, x: int) -> tuple[int, int]:
-        """Absolute ``[start, end)`` covered by tile ``x``."""
+        """Absolute ``[start, end)`` covered by tile ``x``.
+
+        Raises
+        ------
+        TileOutOfBounds
+            If ``x`` does not exist at this zoom; see :meth:`invert` for what
+            counts as in range. The bound is checked here as well as there
+            because the tilesets that work in absolute coordinates -- beddb,
+            bed2ddb and the bigInteract pair -- call only this one, and an
+            unchecked off-lattice position yields a well-formed range far past
+            the genome, zero rows, and an empty tile a client cannot tell apart
+            from "no annotations here".
+        """
+        self._check_pos(x)
         width = self.binsize * self.tile_size
         return (int(x * width), int((x + 1) * width))
 
@@ -374,11 +395,7 @@ class TileCanvas:
                 "canvas has no chromsizes, so tile locations cannot be "
                 "inverted to genomic intervals"
             )
-        if x < 0 or x >= self.n_tiles:
-            raise TileOutOfBounds(
-                f"tile position {x} is outside the {self.n_tiles} tiles at "
-                f"zoom {self.z}"
-            )
+        self._check_pos(x)
         return self.chromsizes.invert(self.tile_span(x))
 
 
