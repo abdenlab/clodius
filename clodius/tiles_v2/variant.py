@@ -106,10 +106,21 @@ def overlap_predicate(ranges: Sequence[GenomicRange]) -> pl.Expr:
     return expr
 
 
-def to_bedlike(row: dict, offsets: dict[str, int]) -> AnnotationRecord:
-    """One materialized row as the client's bedlike shape."""
+def to_bedlike(row: dict, offsets: dict[str, int]) -> AnnotationRecord | None:
+    """One materialized row as the client's bedlike shape.
+
+    ``None`` when the record's contig is absent from ``offsets`` -- an
+    unplaced contig, a naming mismatch, or a different assembly build. The row
+    has no position on the genome-spanning axis, so it is skipped rather than
+    raising: a bare ``KeyError`` is not a
+    :class:`~clodius.core.errors.TileError` and would escape the server
+    boundary as a 500. Handled here rather than at the call sites so a third
+    caller cannot reintroduce it.
+    """
     chrom = row["chrom"]
-    offset = offsets[chrom]
+    offset = offsets.get(chrom)
+    if offset is None:
+        return None
     ids = row["id"] or []
     alts = row["alt"] or []
     filters = row["filter"] or []
@@ -210,6 +221,9 @@ class VariantTileset(BaseTileset):
                 tuple(n for n, _ in pairs), tuple(int(v) for _, v in pairs)
             )
         self._chromsizes = chromsizes
+        # Built once: the chromsizes are fixed for the tileset's life, and the
+        # polars Series behind `is_in` is not free to rebuild per call.
+        self._known_chroms = pl.col("chrom").is_in(list(chromsizes.offsets))
         self._info = self._build_info()
 
     def chromsizes(self) -> Chromsizes:
@@ -252,16 +266,22 @@ class VariantTileset(BaseTileset):
         ``next()`` per skipped record; ``slice`` pushes the row count into the
         reader instead.
         """
+        # Filtered before the slice, so `offset`, `limit` and the next-page
+        # probe all range over the same population. Filtering afterwards lets
+        # one unplaceable row consume the probe -- `has_next` goes False with
+        # records unread -- and leaves `offset` indexing raw file rows while
+        # the page is a filtered subset, so consecutive pages overlap.
         frame = (
             self._frame(regions=None)
+            .filter(self._known_chroms)
             .slice(offset, limit + 1)
             .collect(engine="streaming")
         )
         offsets = self._chromsizes.offsets
         rows = [
-            to_bedlike(r, offsets)
+            record
             for r in frame.to_dicts()
-            if r["chrom"] in offsets
+            if (record := to_bedlike(r, offsets)) is not None
         ]
         has_next = len(rows) > limit
         return [
@@ -355,9 +375,9 @@ class VariantTileset(BaseTileset):
 
         offsets = self._chromsizes.offsets
         records = [
-            to_bedlike(row, offsets)
+            record
             for row in frame.collect(engine="streaming").to_dicts()
-            if row["chrom"] in offsets
+            if (record := to_bedlike(row, offsets)) is not None
         ]
         records.sort(key=lambda r: r["xStart"])
         return records

@@ -84,10 +84,23 @@ def _anchor_overlaps(
     return expr
 
 
-def to_paired(row: dict, offsets: dict[str, int]) -> Annotation2DRecord:
-    """One materialized row as the client's bedpe shape."""
-    x_offset = offsets[row["chrom"]]
-    y_offset = offsets[row["chrom2"]]
+def to_paired(
+    row: dict, offsets: dict[str, int]
+) -> Annotation2DRecord | None:
+    """One materialized row as the client's bedpe shape.
+
+    ``None`` when either anchor's contig is absent from ``offsets`` -- an
+    unplaced contig, a naming mismatch, or a different assembly build. The
+    record has no position on the genome-spanning axis, so it is skipped
+    rather than raising: a bare ``KeyError`` is not a
+    :class:`~clodius.core.errors.TileError` and would escape the server
+    boundary as a 500. Handled here rather than at the call sites so a third
+    caller cannot reintroduce it.
+    """
+    x_offset = offsets.get(row["chrom"])
+    y_offset = offsets.get(row["chrom2"])
+    if x_offset is None or y_offset is None:
+        return None
 
     fields = [
         row["chrom"],
@@ -146,6 +159,11 @@ class _BedpeBase(BaseTileset):
             self._path
         )
         self._chromsizes = chromsizes
+        # Built once: the chromsizes are fixed for the tileset's life, and the
+        # polars Series behind `is_in` is not free to rebuild per tile.
+        self._known_chroms = pl.col("chrom").is_in(
+            list(chromsizes.offsets)
+        ) & pl.col("chrom2").is_in(list(chromsizes.offsets))
         self.policy = policy or TilePolicy()
         self.tile_size = tile_size
         self._info = self._build_info()
@@ -272,9 +290,13 @@ class _BedpeBase(BaseTileset):
 
         predicate, seek_to = self._select(axes)
 
+        offsets = self._chromsizes.offsets
         frame = (
             self._frame(seek_to)
             .filter(predicate)
+            # Filtered before capping: an unknown contig that consumed a cap
+            # slot would silently shorten the tile.
+            .filter(self._known_chroms)
             .with_columns(_digest=self._digest_expr())
         )
 
@@ -282,11 +304,10 @@ class _BedpeBase(BaseTileset):
         if cap is not None:
             frame = frame.top_k(cap, by="_digest")
 
-        offsets = self._chromsizes.offsets
         records = [
-            to_paired(row, offsets)
+            record
             for row in frame.collect(engine="streaming").to_dicts()
-            if row["chrom"] in offsets and row["chrom2"] in offsets
+            if (record := to_paired(row, offsets)) is not None
         ]
         records.sort(key=lambda r: (r["xStart"], r["yStart"]))
         return records
