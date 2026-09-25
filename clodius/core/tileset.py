@@ -129,8 +129,6 @@ class ProvidesRegions(Protocol):
 class BaseTileset:
     """Optional convenience base: context-manager support and defaults."""
 
-    modifiers: ClassVar[ModifierSpec | None] = None
-    options: ClassVar[frozenset[str]] = frozenset()
     # Annotated, deliberately not assigned. An inherited default would let a
     # subclass that forgot to declare its arity serve tiles at someone else's,
     # silently; the absence is caught in `parse_tile_id` instead, where it is
@@ -141,9 +139,11 @@ class BaseTileset:
     # though nothing in the tree performs it, and the class-level
     # `issubclass` form is unavailable for a protocol with non-method members.
     ndim: ClassVar[int]
-
     tile_size: int
     policy: TilePolicy
+
+    modifiers: ClassVar[ModifierSpec | None] = None
+    options: ClassVar[frozenset[str]] = frozenset()
 
     def tiles(
         self,
@@ -178,10 +178,6 @@ class BaseTileset:
                 out.append((tid, exc.to_dict()))
         return out
 
-    def _tile(self, tid: TileId) -> TileKind:
-        """One tile's payload, or raise a `TileError` refusing it."""
-        raise NotImplementedError
-
     def parse_tile_id(self, tile_id: str) -> TileId:
         """Parse against this tileset's declared shape."""
         # `getattr` with a default is load-bearing: `ndim: ClassVar[int]`
@@ -214,6 +210,13 @@ class BaseTileset:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+    def _tile(self, tid: TileId) -> TileKind:
+        """One tile's payload, or raise a `TileError` refusing it.
+
+        The seam `tiles` calls, once per requested id.
+        """
+        raise NotImplementedError
 
 
 def _quadtree_depth(total_length: int, tile_size_bp: int) -> int:
@@ -271,6 +274,18 @@ class DatasetInfo(BaseModel):
     # while every instance raised TypeError.
     __hash__ = None
 
+    min_pos: list[int]
+    max_pos: list[int]
+    max_width: int | None = None
+    chromsizes: list[tuple[str, int]] | None = None
+
+    @field_validator("max_width")
+    @classmethod
+    def _max_width_positive(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            raise ValueError("max_width must be > 0")
+        return v
+
     def with_(self, **changes: Any) -> Self:
         """A copy with ``changes`` applied, re-validated.
 
@@ -284,18 +299,6 @@ class DatasetInfo(BaseModel):
         `to_dict()` ships it to the client.
         """
         return type(self)(**{**self.model_dump(exclude_none=True), **changes})
-
-    min_pos: list[int]
-    max_pos: list[int]
-    max_width: int | None = None
-    chromsizes: list[tuple[str, int]] | None = None
-
-    @field_validator("max_width")
-    @classmethod
-    def _max_width_positive(cls, v: int | None) -> int | None:
-        if v is not None and v <= 0:
-            raise ValueError("max_width must be > 0")
-        return v
 
     def to_dict(self) -> dict[str, Any]:
         """The info as the client should receive it.

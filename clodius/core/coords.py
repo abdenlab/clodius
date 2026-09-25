@@ -336,14 +336,6 @@ class TileCanvas:
         """Tiles needed to cover the canvas at this zoom."""
         return math.ceil(self.n_bins / self.tile_size)
 
-    def _check_pos(self, x: int) -> None:
-        """Raise unless tile ``x`` exists at this zoom."""
-        if x < 0 or x >= self.n_tiles:
-            raise TileOutOfBounds(
-                f"tile position {x} is outside the {self.n_tiles} tiles at "
-                f"zoom {self.z}"
-            )
-
     def tile_span(self, x: int) -> tuple[int, int]:
         """Absolute ``[start, end)`` covered by tile ``x``.
 
@@ -405,6 +397,14 @@ class TileCanvas:
             )
         self._check_pos(x)
         return self.chromsizes.invert(self.tile_span(x))
+
+    def _check_pos(self, x: int) -> None:
+        """Raise unless tile ``x`` exists at this zoom."""
+        if x < 0 or x >= self.n_tiles:
+            raise TileOutOfBounds(
+                f"tile position {x} is outside the {self.n_tiles} tiles at "
+                f"zoom {self.z}"
+            )
 
 
 _DIGITS = re.compile(r"(\d+)", re.U)
