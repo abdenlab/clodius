@@ -20,6 +20,8 @@ from typing import Iterable, Iterator, Literal
 import bioframe
 import numpy as np
 
+from clodius.core.errors import TileOutOfBounds
+
 
 @dataclass(frozen=True, slots=True)
 class GenomicRange:
@@ -298,6 +300,27 @@ class TileCanvas:
     max_width: int
     chromsizes: Chromsizes | None = None
 
+    def __post_init__(self):
+        # TilesetInfo validates these upstream, but TileCanvas is re-exported
+        # from clodius.core and can be constructed directly -- where a zero
+        # tile size or binsize surfaced as ZeroDivisionError from a property,
+        # and a negative extent constructed silently.
+        # Inverted rather than `<= 0`: binsize is a float, and `nan <= 0` is
+        # False, so the straightforward spelling admits NaN and lets it surface
+        # as a ValueError from `n_bins` -- one step removed from the argument
+        # that was actually wrong, which is the failure this guard exists to
+        # prevent.
+        if not self.binsize > 0:
+            raise ValueError(f"binsize must be positive, got {self.binsize}")
+        if self.tile_size <= 0:
+            raise ValueError(
+                f"tile_size must be positive, got {self.tile_size}"
+            )
+        if self.max_width < 0:
+            raise ValueError(
+                f"max_width must be non-negative, got {self.max_width}"
+            )
+
     @property
     def span(self) -> tuple[int, int]:
         """Absolute ``[start, end)`` the whole canvas covers."""
@@ -314,7 +337,21 @@ class TileCanvas:
         return math.ceil(self.n_bins / self.tile_size)
 
     def tile_span(self, x: int) -> tuple[int, int]:
-        """Absolute ``[start, end)`` covered by tile ``x``."""
+        """Absolute ``[start, end)`` covered by tile ``x``.
+
+        Raises
+        ------
+        TileOutOfBounds
+            If ``x`` does not exist at this zoom; see `invert` for what
+            counts as in range. Checked here as well as there because a
+            position reaching this method has not necessarily passed through
+            `invert` first -- a tileset working in absolute coordinates may
+            call only this one, and the 2D bigInteract tile's ``y`` is screened
+            nowhere else. Unchecked, an off-lattice position yields a
+            well-formed range far past the genome, zero rows, and an empty tile
+            a client cannot tell apart from "no annotations here".
+        """
+        self._check_pos(x)
         width = self.binsize * self.tile_size
         return (int(x * width), int((x + 1) * width))
 
@@ -336,13 +373,38 @@ class TileCanvas:
         yield from range(first, last + 1)
 
     def invert(self, x: int) -> Iterator[GenomicRange]:
-        """Genomic intervals covered by tile ``x``."""
+        """Genomic intervals covered by tile ``x``.
+
+        Validation is eager, unlike its sibling `transform`: this is an
+        ordinary function returning a generator, not a generator function, so
+        the exceptions below are raised at the call rather than on the first
+        iteration. Callers rely on that to screen a position without consuming
+        the result -- adding a ``yield`` to this body would silently defer the
+        raise and disarm those checks.
+
+        Raises
+        ------
+        TileOutOfBounds
+            If ``x`` does not exist at this zoom. Tiles past the end of the
+            *genome* but inside the canvas are in range -- that padding is
+            what fills the trailing NaN bins of low-zoom tiles. Only positions
+            past the end of the *canvas* are rejected.
+        """
         if self.chromsizes is None:
             raise ValueError(
                 "canvas has no chromsizes, so tile locations cannot be "
                 "inverted to genomic intervals"
             )
+        self._check_pos(x)
         return self.chromsizes.invert(self.tile_span(x))
+
+    def _check_pos(self, x: int) -> None:
+        """Raise unless tile ``x`` exists at this zoom."""
+        if x < 0 or x >= self.n_tiles:
+            raise TileOutOfBounds(
+                f"tile position {x} is outside the {self.n_tiles} tiles at "
+                f"zoom {self.z}"
+            )
 
 
 _DIGITS = re.compile(r"(\d+)", re.U)

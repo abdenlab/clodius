@@ -11,13 +11,13 @@ Two tilesets:
 from __future__ import annotations
 
 import os
-from typing import ClassVar, Sequence
+from typing import ClassVar
 
 import numpy as np
 import oxbow as ox
 
 from clodius.core.coords import Chromsizes
-from clodius.core.errors import TileError, TileTooWide
+from clodius.core.errors import TileTooWide
 from clodius.core.tile import DenseTile, SequenceTilePayload, DenseTilePayload
 from clodius.core.policies import TilePolicy
 from clodius.core.tileid import TileId
@@ -124,18 +124,6 @@ class _FastaBase(BaseTileset):
 
     def info(self) -> TilesetInfo:
         return self._info
-
-    def tiles(
-        self, ids: Sequence[TileId], options=None
-    ) -> list[tuple[TileId, SequenceTilePayload | DenseTilePayload]]:
-        """One entry per requested id; a refusal rides in the payload slot."""
-        out = []
-        for tid in ids:
-            try:
-                out.append((tid, self._tile(tid)))
-            except TileError as exc:
-                out.append((tid, exc.to_dict()))
-        return out
 
     def close(self) -> None:
         pass

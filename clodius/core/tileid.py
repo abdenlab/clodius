@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from clodius.core.errors import (
     MalformedTileId,
+    TilesetUnavailable,
     UnsupportedModifier,
     UnsupportedOption,
 )
@@ -27,8 +28,29 @@ TILE_OPTIONS_CHAR = ","
 
 
 def _is_int(text: str) -> bool:
-    """Whether a dotted part is a coordinate rather than a modifier."""
-    return text.isdigit() or (text[:1] == "-" and text[1:].isdigit())
+    """Whether a dotted part is a coordinate rather than a modifier.
+
+    A leading ``-`` counts, so that a negative coordinate is read as the
+    coordinate it is and rejected by `TileId.parse` with a message
+    naming the problem, rather than falling through to the modifier slot.
+
+    ASCII decimal digits only, which is narrower than both of the obvious
+    spellings. ``int`` would accept ``+5`` and ``1_0``; ``str.isdigit`` is the
+    opposite error, admitting superscripts that ``int`` then rejects with a
+    bare ``ValueError`` -- not a
+    `clodius.core.errors.TilesetError`, so it escapes the server
+    boundary as a 500; and ``str.isdecimal`` alone still admits fullwidth
+    digits, where ``int`` succeeds and ``abc.3.１`` silently denotes tile 1.
+
+    This does not close every alias. Leading zeros and a negative zero are
+    not normalized, so a tile has more than one spelling: ``abc.-0.0`` and
+    ``abc.0.0`` both denote tile 0, and ``abc.00.007`` and ``abc.0.7`` both
+    denote tile 7. The answer is correct either way, since ``raw`` is echoed
+    back verbatim; only the cache key duplicates.
+    """
+    return text.isascii() and (
+        text.isdecimal() or (text[:1] == "-" and text[1:].isdecimal())
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +148,25 @@ class TileId:
         slots from modifiers: with the arity fixed, a trailing non-numeric part
         is unambiguously the modifier.
         """
+        # Checked before the id itself, and reported against the tileset
+        # rather than the request. The arity is the tileset's own declaration,
+        # so a client told its well-formed id was malformed retries forever
+        # against a fault only the server can fix -- the same reasoning
+        # `BaseTileset.parse_tile_id` applies to a missing `ndim`. Fatal to the
+        # tileset, not renderable per tile: `TilesetUnavailable` is a sibling
+        # of `TileError`, not a subclass.
+        #
+        # Without the check nothing raises loudly. `ndim=0` parses a
+        # coordinate-less id without complaint, or reads the position as a
+        # modifier; `ndim<0` slices its way to an `IndexError`. Neither is a
+        # `TilesetError`, so neither reaches the boundary as anything a client
+        # can read.
+        if ndim < 1:
+            raise TilesetUnavailable(
+                f"invalid arity {ndim} declared for {tile_id!r}; a tile id "
+                f"needs at least one coordinate"
+            )
+
         head, _, opt_str = tile_id.partition(TILE_OPTIONS_CHAR)
 
         parsed_options: list[tuple[str, str]] = []
@@ -144,9 +185,6 @@ class TileId:
                 parsed_options.append((key, value))
 
         parts = head.split(".")
-        if ndim < 1:
-            raise ValueError(f"ndim must be at least 1, got {ndim}")
-
         expected = 1 + 1 + ndim  # uid + z + coords
         if len(parts) < expected or not all(
             _is_int(p) for p in parts[1:expected]
@@ -158,6 +196,18 @@ class TileId:
 
         uid = parts[0]
         numbers = [int(p) for p in parts[1:expected]]
+
+        # Validated here rather than downstream. A negative position otherwise
+        # reaches `Chromsizes.invert`, which raises a plain `ValueError` -- and
+        # a `ValueError` is not a `TilesetError`, so the server boundary cannot
+        # render it into a per-tile error payload and a single malformed id
+        # takes down the whole batch.
+        if numbers[0] < 0:
+            raise MalformedTileId(
+                f"negative zoom level {numbers[0]} in {tile_id!r}"
+            )
+        if any(n < 0 for n in numbers[1:]):
+            raise MalformedTileId(f"negative tile position in {tile_id!r}")
 
         modifier_parts = parts[expected:]
         if len(modifier_parts) > 1:

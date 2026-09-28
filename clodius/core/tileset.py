@@ -4,13 +4,17 @@ import math
 from functools import cached_property
 from enum import Enum
 from collections.abc import Mapping
-from typing import Any, ClassVar, Protocol, Sequence, runtime_checkable
+from typing import Any, ClassVar, Protocol, Self, Sequence, runtime_checkable
 
 from clodius.core.coords import TileCanvas, Chromsizes
 from clodius.core.tile import AnnotationRecord, TileKind
 from clodius.core.policies import TilePolicy
 from clodius.core.tileid import ModifierSpec, TileId
-from clodius.core.errors import TileOutOfBounds
+from clodius.core.errors import (
+    TileError,
+    TileOutOfBounds,
+    TilesetUnavailable,
+)
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -125,19 +129,77 @@ class ProvidesRegions(Protocol):
 class BaseTileset:
     """Optional convenience base: context-manager support and defaults."""
 
-    modifiers: ClassVar[ModifierSpec | None] = None
-    options: ClassVar[frozenset[str]] = frozenset()
-
+    # Annotated, deliberately not assigned. An inherited default would let a
+    # subclass that forgot to declare its arity serve tiles at someone else's,
+    # silently; the absence is caught in `parse_tile_id` instead, where it is
+    # reported as the server-side misdeclaration it is. What the annotation
+    # buys is that named error rather than an `AttributeError` at the first
+    # request. It also keeps `isinstance(x, Tileset)` honest -- the protocol is
+    # runtime-checkable, so that check tests for the attribute's presence --
+    # though nothing in the tree performs it, and the class-level
+    # `issubclass` form is unavailable for a protocol with non-method members.
+    ndim: ClassVar[int]
     tile_size: int
     policy: TilePolicy
 
+    modifiers: ClassVar[ModifierSpec | None] = None
+    options: ClassVar[frozenset[str]] = frozenset()
+
+    def tiles(
+        self,
+        ids: Sequence[TileId],
+        options: Mapping[str, Any] | None = None,
+    ) -> list[tuple[TileId, TileKind]]:
+        """One entry per requested id, always.
+
+        The per-tile boundary `clodius.core.errors` describes, in one place.
+        A refusal lands in that tile's payload slot rather than aborting the
+        batch. Only errors that are genuinely per-tile are caught -- an
+        unreadable file still raises, because retrying the other fifteen tiles
+        against it is pointless.
+
+        A tileset whose `_tile` needs more than a tile id -- a batch-wide
+        option, a shared reader -- overrides this; every other one inherits it.
+        A tileset inheriting this default understands no options at all, so a
+        non-empty ``options`` is refused rather than dropped: the protocol says
+        malformed options are a whole-batch failure, and silently serving
+        tiles that ignore what was asked for is the worse of the two answers.
+        """
+        if options:
+            raise TilesetUnavailable(
+                f"{type(self).__name__} accepts no tile options; got "
+                f"{sorted(options)}"
+            )
+        out = []
+        for tid in ids:
+            try:
+                out.append((tid, self._tile(tid)))
+            except TileError as exc:
+                out.append((tid, exc.to_dict()))
+        return out
+
     def parse_tile_id(self, tile_id: str) -> TileId:
         """Parse against this tileset's declared shape."""
+        # `getattr` with a default is load-bearing: `ndim: ClassVar[int]`
+        # creates an annotation and no attribute, so `self.ndim` would raise
+        # AttributeError. The arity is the tileset's own declaration and not
+        # part of the request, so a missing one is `TilesetUnavailable` -- a
+        # client told its well-formed id was malformed retries forever against
+        # a fault only the server can fix.
+        ndim = getattr(self, "ndim", None)
+        if ndim is None:
+            raise TilesetUnavailable(
+                f"{type(self).__name__} declares no ndim, so a tile id "
+                f"cannot be parsed against it"
+            )
         return TileId.parse(
             tile_id,
-            ndim=self.ndim,  # type: ignore[attr-defined]
+            ndim=ndim,
             modifiers=self.modifiers,
-            options=self.options or None,
+            # Passed through unchanged. `self.options or None` would collapse
+            # an empty frozenset to `None` -- "accept any option" -- which is
+            # the opposite of what an empty set declares.
+            options=self.options,
         )
 
     def close(self) -> None:
@@ -148,6 +210,13 @@ class BaseTileset:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+    def _tile(self, tid: TileId) -> TileKind:
+        """One tile's payload, or raise a `TileError` refusing it.
+
+        The seam `tiles` calls, once per requested id.
+        """
+        raise NotImplementedError
 
 
 def _quadtree_depth(total_length: int, tile_size_bp: int) -> int:
@@ -190,9 +259,20 @@ class Ladder(str, Enum):
 
 
 class DatasetInfo(BaseModel):
-    """Fields common to anything servable, tiled or not."""
+    """Fields common to anything servable, tiled or not.
 
-    model_config = ConfigDict(extra="allow")
+    Frozen, like `TilesetInfo`. Both are public and `Dataset.info()`
+    is annotated with this one, so code written against the base's contract
+    would otherwise type-check and then fail only on the subclass. Derive a
+    variant with `with_`.
+    """
+
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    # `frozen=True` makes pydantic synthesize a hash over the fields, and
+    # `min_pos`/`max_pos` are lists -- so the type would advertise Hashable
+    # while every instance raised TypeError.
+    __hash__ = None
 
     min_pos: list[int]
     max_pos: list[int]
@@ -206,6 +286,20 @@ class DatasetInfo(BaseModel):
             raise ValueError("max_width must be > 0")
         return v
 
+    def with_(self, **changes: Any) -> Self:
+        """A copy with ``changes`` applied, re-validated.
+
+        Unlike ``model_copy(update=...)`` this runs the constructor, so an
+        out-of-range value is rejected rather than served verbatim, and any
+        cached derivation is rebuilt from the new fields instead of surviving
+        the copy. Mirrors `TilePolicy.with_`.
+
+        A misspelled key is *not* caught, by either route: the model allows
+        extra fields, so the constructor accepts an unknown name and
+        `to_dict()` ships it to the client.
+        """
+        return type(self)(**{**self.model_dump(exclude_none=True), **changes})
+
     def to_dict(self) -> dict[str, Any]:
         """The info as the client should receive it.
 
@@ -216,7 +310,24 @@ class DatasetInfo(BaseModel):
 
 
 class TilesetInfo(DatasetInfo):
-    """A :class:`DatasetInfo` that also carries a resolution ladder."""
+    """A `DatasetInfo` that also carries a resolution ladder.
+
+    Frozen, which is what makes the cached `coordinate_system` sound: the
+    field it reads cannot be rebound underneath it. Only rebound -- pydantic's
+    freeze does not reach inside the list, so mutating ``chromsizes`` in place
+    leaves the cache stale and is unsupported.
+
+    Derive a variant with `with_`, which re-validates and rebuilds the cache.
+    ``model_copy(update=...)`` does neither: an out-of-range value is accepted
+    where the constructor would reject it, and a copy updating ``chromsizes``
+    keeps the coordinate system derived from the old ones.
+    """
+
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    # Inherited from DatasetInfo in intent, restated because pydantic
+    # re-synthesizes a hash for every frozen model.
+    __hash__ = None
 
     # --- ladder, implicit form (power-of-two) ---
     max_zoom: int | None = None

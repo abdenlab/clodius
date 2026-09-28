@@ -12,6 +12,8 @@ from clodius.core.tile import Annotation2DRecord
 from clodius.core.policies import TilePolicy, LinkPolicy
 from clodius.core.tileid import TileId
 from clodius.core.tileset import BaseTileset, TilesetInfo
+from clodius.tiles_v2._exprs import known_chroms
+from clodius.tiles_v2._index import indexed_contigs, screen_regions
 
 TILE_SIZE = 1024
 
@@ -84,10 +86,23 @@ def _anchor_overlaps(
     return expr
 
 
-def to_paired(row: dict, offsets: dict[str, int]) -> Annotation2DRecord:
-    """One materialized row as the client's bedpe shape."""
-    x_offset = offsets[row["chrom"]]
-    y_offset = offsets[row["chrom2"]]
+def to_paired(
+    row: dict, offsets: dict[str, int]
+) -> Annotation2DRecord | None:
+    """One materialized row as the client's bedpe shape.
+
+    ``None`` when either anchor's contig is absent from ``offsets`` -- an
+    unplaced contig, a naming mismatch, or a different assembly build. The
+    record has no position on the genome-spanning axis, so it is skipped
+    rather than raising: a bare ``KeyError`` is not a
+    `clodius.core.errors.TileError` and would escape the server
+    boundary as a 500. Handled here rather than at the call sites so a third
+    caller cannot reintroduce it.
+    """
+    x_offset = offsets.get(row["chrom"])
+    y_offset = offsets.get(row["chrom2"])
+    if x_offset is None or y_offset is None:
+        return None
 
     fields = [
         row["chrom"],
@@ -146,6 +161,13 @@ class _BedpeBase(BaseTileset):
             self._path
         )
         self._chromsizes = chromsizes
+        self._known_chroms = known_chroms(chromsizes, "chrom", "chrom2")
+        # What the index can be asked for; see `clodius.tiles_v2._index`.
+        self._index_contigs = (
+            indexed_contigs(self._path, self._index_path)
+            if self._is_indexed
+            else None
+        )
         self.policy = policy or TilePolicy()
         self.tile_size = tile_size
         self._info = self._build_info()
@@ -161,20 +183,19 @@ class _BedpeBase(BaseTileset):
     def info(self) -> TilesetInfo:
         return self._info
 
-    def tiles(
-        self, ids: Sequence[TileId], options=None
-    ) -> list[tuple[TileId, list[Annotation2DRecord]]]:
-        return [(tid, self._tile(tid)) for tid in ids]
-
     def close(self) -> None:
         pass
 
     # --- what the subclasses supply -----------------------------------------
 
     def _select(
-        self, canvas, tid: TileId
+        self, axes: list[list[GenomicRange]]
     ) -> tuple[pl.Expr, list[GenomicRange] | None]:
         """The tile's selection predicate, and the anchor-1 ranges to seek.
+
+        ``axes`` holds the genomic ranges each of the tile's coordinate slots
+        covers, already inverted by the caller and already screened for a slot
+        with nothing in bounds.
 
         Returning the seek ranges alongside the predicate keeps the two
         consistent: a subclass cannot ask for a seek that its predicate does not
@@ -205,7 +226,16 @@ class _BedpeBase(BaseTileset):
         ).hash(seed=HASH_SEED)
 
     def _check_scannable(self) -> None:
-        if self._checked_size:
+        """Refuse to scan an unindexed file above the policy ceiling.
+
+        The `_is_indexed` arm is load-bearing rather than an optimization.
+        `BedpeLinksTileset._select` returns no seek for `LinkPolicy.EITHER` --
+        the default -- so an indexed file reaches this on every in-bounds tile,
+        and without the early return a perfectly well-indexed file above the
+        ceiling is refused with a message saying it is not indexed. Same guard
+        bed.py and variant.py apply, for the same reason.
+        """
+        if self._is_indexed or self._checked_size:
             return
         limit = self.policy.max_scan_bytes
         size = os.path.getsize(self._path)
@@ -246,11 +276,36 @@ class _BedpeBase(BaseTileset):
 
     def _tile(self, tid: TileId) -> list[Annotation2DRecord]:
         canvas = self._info.canvas(tid.z)
-        predicate, seek_to = self._select(canvas, tid)
 
+        # Screened before any frame is built. `max_width` always exceeds the
+        # genome length, so a tile past the end of the genome is routine --
+        # and there every range is out of bounds, the seek list collapses to
+        # "no restriction", and `_check_scannable` raises TilesetUnavailable
+        # for an indexed file above the ceiling. That is a *sibling* of
+        # TileError, not a subclass, so the per-tile boundary does not catch
+        # it and one routine off-the-end tile fails the whole request. Under
+        # the ceiling it merely scans the file end to end to match nothing.
+        axes = [list(canvas.invert(pos)) for pos in tid.pos]
+        if any(all(gr.is_out_of_bounds for gr in axis) for axis in axes):
+            return []
+
+        predicate, seek_to = self._select(axes)
+        if seek_to is not None and self._is_indexed:
+            # Only the seeking policies reach this. A contig absent from
+            # the index has no records, so an empty screen is an empty
+            # tile -- and querying it would raise past the per-tile
+            # boundary as a ComputeError.
+            seek_to = screen_regions(seek_to, self._index_contigs)
+            if not seek_to:
+                return []
+
+        offsets = self._chromsizes.offsets
         frame = (
             self._frame(seek_to)
             .filter(predicate)
+            # Filtered before capping: an unknown contig that consumed a cap
+            # slot would silently shorten the tile.
+            .filter(self._known_chroms)
             .with_columns(_digest=self._digest_expr())
         )
 
@@ -258,11 +313,10 @@ class _BedpeBase(BaseTileset):
         if cap is not None:
             frame = frame.top_k(cap, by="_digest")
 
-        offsets = self._chromsizes.offsets
         records = [
-            to_paired(row, offsets)
+            record
             for row in frame.collect(engine="streaming").to_dicts()
-            if row["chrom"] in offsets and row["chrom2"] in offsets
+            if (record := to_paired(row, offsets)) is not None
         ]
         records.sort(key=lambda r: (r["xStart"], r["yStart"]))
         return records
@@ -287,9 +341,8 @@ class BedpeTileset(_BedpeBase):
     ndim: ClassVar[int] = 2
     datatype: ClassVar[str] = "2d-rectangle-domains"
 
-    def _select(self, canvas, tid):
-        x_ranges = list(canvas.invert(tid.pos[0]))
-        y_ranges = list(canvas.invert(tid.pos[1]))
+    def _select(self, axes):
+        x_ranges, y_ranges = axes
         predicate = _anchor_overlaps(
             x_ranges, "chrom", "start", "end"
         ) & _anchor_overlaps(y_ranges, "chrom2", "start2", "end2")
@@ -327,8 +380,8 @@ class BedpeLinksTileset(_BedpeBase):
     def link_policy(self) -> LinkPolicy:
         return self._link_policy
 
-    def _select(self, canvas, tid):
-        ranges = list(canvas.invert(tid.pos[0]))
+    def _select(self, axes):
+        (ranges,) = axes
         a1 = _anchor_overlaps(ranges, "chrom", "start", "end")
         a2 = _anchor_overlaps(ranges, "chrom2", "start2", "end2")
 

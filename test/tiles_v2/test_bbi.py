@@ -1,74 +1,53 @@
-"""Tests for the tileset info in clodius.tiles_v2.bbi.
+"""Tests for clodius.tiles_v2.bbi.
 
-One module serves bigWig and bigBed through four concrete tilesets that share
-a single ``_info_for``: three of them one-dimensional, and the bigInteract 2D
-tileset two-dimensional. The shared builder has to describe whichever arity
-its subclass declares, because ``min_pos`` and ``max_pos`` are per-axis on the
-wire -- a 2D track reads the y extent from ``max_pos[1]``.
+One module serving bigWig and bigBed through four concrete tilesets that share
+a single info builder: a signal tileset emitting dense vectors, an annotation
+tileset emitting records, and the two bigInteract tilesets -- links, which is
+one-dimensional, and rectangles, which is not. All four derive their info the
+same way: build a quadtree over the chromsizes, then pad ``max_pos`` out to the
+quadtree extent so the client's axis matches the grid the tiles are cut from.
 
-The arity is the only thing this info gets from the subclass, and it is the
-only thing under test here. ``canvas()`` derives its extent from the scalar
-``max_width``, so tile serving does not read these fields at all and a wrong
-arity is invisible everywhere except the served info. Nothing looked at the
-served info before.
+That padding is the part under test here, in both of its dimensions. It is
+applied by deriving a variant of the info, and the served info is the only
+place a broken derivation becomes visible -- nothing looked at it before.
 
-The padded extent matters as much as the count. The range is padded out to the
-full quadtree extent rather than the genome length, as legacy does, so the
-fixtures below total 2500 bp against an extent of 4096 -- a build padding with
-the genome total would otherwise be indistinguishable from a correct one.
+How many entries it pads matters as much as the value. ``min_pos`` and
+``max_pos`` are per-axis on the wire, so a two-dimensional tileset that
+publishes one of each leaves a 2D track with no second axis to lay out. The
+arity is the only thing the shared builder takes from its subclass, and
+``canvas()`` derives its extent from the scalar ``max_width``, so a wrong
+arity is invisible everywhere except the served info.
 
-Fixtures are synthesized with pybigtools in milliseconds, so the module runs
-on a checkout with no git-LFS payload. Note the chromsizes go to ``write``,
-not to ``open``: the wrapper's ``open`` takes only a path and a mode. Two
-writer constraints shape the records below -- they must be coordinate-sorted,
-and a contig carrying no records is dropped from the file's chrom list, so
-every contig the tileset should see needs at least one.
+The fixtures are synthesized with pybigtools in milliseconds. Note that the
+chromsizes go to ``write``, not to ``open`` -- the wrapper's ``open`` takes
+only a path and a mode.
 """
 
+import base64
+import hashlib
+import pathlib
+
+import numpy as np
 import pybigtools
 import pytest
 
+from clodius.core.coords import Chromsizes
+from clodius.core.policies import LinkPolicy, TilePolicy
 from clodius.tiles_v2.bbi import (
     BBIAnnotationTileset,
     BBIInteraction2DTileset,
     BBIInteractionLinksTileset,
     BBISignalTileset,
+    to_bedlike,
+    to_interaction,
 )
 
-#: Totals 2500 bp, which a four-bin tile size covers with a quadtree extent of
-#: 4096 -- so the padded range is distinguishable from the genome length.
-CHROMSIZES = {"c1": 1000, "c2": 1500}
+#: Totals 3000 bp, which a four-bin tile size covers with a quadtree extent of
+#: 4096 -- so the padded `max_pos` is distinguishable from the genome length.
+CHROMSIZES = {"c1": 1000, "c2": 1500, "c3": 500}
 
 TILE_SIZE = 4
 QUADTREE_EXTENT = 4096
-GENOME_LENGTH = sum(CHROMSIZES.values())
-
-
-def interact_record(name, source, target):
-    """One bed5+13 interact row, as the tab-joined rest of a bigBed record.
-
-    The hull is the record's own start and end; the anchors live in the custom
-    fields, which is what makes this schema worth a fixture of its own.
-    """
-    source_chrom, source_start, source_end = source
-    target_chrom, target_start, target_end = target
-    return "\t".join(
-        [
-            name,
-            "0",
-            "+",
-            "hg38",
-            "0",
-            source_chrom,
-            str(source_start),
-            str(source_end),
-            "0,0,0",
-            target_chrom,
-            str(target_start),
-            str(target_end),
-            "0,0,0",
-        ]
-    )
 
 
 @pytest.fixture(scope="module")
@@ -82,6 +61,7 @@ def bigwig(tmp_path_factory):
                 ("c1", 0, 500, 1.5),
                 ("c1", 500, 1000, 3.0),
                 ("c2", 0, 1500, 2.0),
+                ("c3", 0, 500, 4.0),
             ]
         ),
     )
@@ -90,7 +70,62 @@ def bigwig(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def bigbed(tmp_path_factory):
-    """A bed5+13 bigBed holding two interactions, one per contig."""
+    """A bigBed holding three features."""
+    path = str(tmp_path_factory.mktemp("bbi") / "annot.bb")
+    pybigtools.open(path, "w").write(
+        CHROMSIZES,
+        iter(
+            [
+                ("c1", 10, 20, "a\t100"),
+                ("c1", 300, 400, "b\t200"),
+                ("c2", 50, 60, "c\t300"),
+            ]
+        ),
+    )
+    return path
+
+
+def interact_record(name, source, target, value="0"):
+    """One bed5+13 interact row, as the tab-joined rest of a bigBed record.
+
+    The hull is the record's own start and end; the anchors live in the custom
+    fields, which is what makes this schema worth a fixture of its own.
+
+    Fifteen fields, not thirteen. `sourceName` and `sourceStrand` sit between
+    the source and target anchors, and omitting them shifts every target index
+    by two -- `TARGET_CHROM` reads the target *start* -- so the record is two
+    fields short of `INTERACT_FIELDS` and `to_interaction` refuses it outright.
+    Nothing caught that while the fixture was only ever read by `info()` tests.
+
+    ``value`` lands at the index `to_interaction` reads as `importance`; a
+    non-numeric one exercises the digest fallback.
+    """
+    source_chrom, source_start, source_end = source
+    target_chrom, target_start, target_end = target
+    return "\t".join(
+        [
+            name,
+            "0",
+            str(value),
+            "hg38",
+            "0",
+            source_chrom,
+            str(source_start),
+            str(source_end),
+            f"{name}_src",
+            "+",
+            target_chrom,
+            str(target_start),
+            str(target_end),
+            f"{name}_tgt",
+            "-",
+        ]
+    )
+
+
+@pytest.fixture(scope="module")
+def bigInteract(tmp_path_factory):
+    """A bed5+13 bigBed holding one interaction per contig."""
     path = str(tmp_path_factory.mktemp("bbi") / "interact.bb")
     pybigtools.open(path, "w").write(
         CHROMSIZES,
@@ -108,13 +143,580 @@ def bigbed(tmp_path_factory):
                     700,
                     interact_record("b", ("c2", 20, 70), ("c2", 650, 700)),
                 ),
+                (
+                    "c3",
+                    5,
+                    400,
+                    interact_record("c", ("c3", 5, 40), ("c3", 360, 400)),
+                ),
             ]
         ),
     )
     return path
 
 
-def test_info_should_return_one_position_per_axis_for_a_2d_tileset(bigbed):
+#: A single 1000 bp contig, so the quadtree extent is 1024 and a zoom-3 tile
+#: spans 128 bp -- small enough to place anchors in known tiles by hand.
+LINK_CHROMSIZES = {"c1": 1000}
+
+
+@pytest.fixture(scope="module")
+def bigInteractLinks(tmp_path_factory):
+    """Three interactions that separate the three link policies at one tile.
+
+    At zoom 3 tile 1 spans [128, 256): ``near`` has both anchors inside,
+    ``straddle`` has one, and ``spanner`` has neither but a hull that crosses.
+    """
+    path = str(tmp_path_factory.mktemp("bbi") / "links.bb")
+    pybigtools.open(path, "w").write(
+        LINK_CHROMSIZES,
+        iter(
+            [
+                (
+                    "c1",
+                    10,
+                    190,
+                    interact_record(
+                        "straddle", ("c1", 10, 20), ("c1", 180, 190)
+                    ),
+                ),
+                (
+                    "c1",
+                    10,
+                    310,
+                    interact_record(
+                        "spanner", ("c1", 10, 20), ("c1", 300, 310)
+                    ),
+                ),
+                (
+                    "c1",
+                    140,
+                    210,
+                    interact_record("near", ("c1", 140, 150), ("c1", 200, 210))
+                ),
+            ]
+        ),
+    )
+    return path
+
+
+def interaction_tuple(value="0", source=("c1", 10, 20), target=("c1", 30, 40)):
+    """An 18-field interact record as ``fetch_records`` returns one."""
+    src_chrom, src_start, src_end = source
+    tgt_chrom, tgt_start, tgt_end = target
+    return (
+        src_chrom, 10, 40, "link", "0", str(value), "hg38", "0",
+        src_chrom, str(src_start), str(src_end), "src", "+",
+        tgt_chrom, str(tgt_start), str(tgt_end), "tgt", "-",
+    )
+
+
+def link_names(payload):
+    """The name column of each served interaction."""
+    return sorted(r["fields"][3] for r in payload)
+
+
+def bin_count(payload):
+    """Bins in a dense payload, discounting values-per-bin."""
+    values = np.frombuffer(
+        base64.b64decode(payload["dense"]), dtype=payload["dtype"]
+    )
+    return len(values) // payload.get("size", 1)
+
+
+@pytest.mark.parametrize(
+    "policy,expected",
+    [
+        (LinkPolicy.BOTH, ["near"]),
+        (LinkPolicy.EITHER, ["near", "straddle"]),
+        (LinkPolicy.HULL, ["near", "spanner", "straddle"]),
+    ],
+    ids=["both", "either", "hull"],
+)
+def test_tiles_should_select_the_links_the_policy_asks_for(
+    bigInteractLinks, policy, expected
+):
+    """Test the three link policies against a tile that separates them.
+
+    Given:
+        A bigInteract holding one link with both anchors in the tile, one with
+        a single anchor in it, and one with neither but a hull that crosses
+        it, served under each policy.
+    When:
+        That tile is served.
+    Then:
+        Each policy should return a different set -- ``both`` the one link,
+        ``either`` adding the single-anchor link, ``hull`` adding the link
+        that merely passes over. Nothing else distinguishes ``BOTH`` from
+        ``HULL``, so without this the two arms are interchangeable.
+    """
+    # Arrange
+    tileset = BBIInteractionLinksTileset(
+        bigInteractLinks, link_policy=policy, tile_size=TILE_SIZE
+    )
+
+    # Act
+    (_, payload), = tileset.tiles([tileset.parse_tile_id("u.3.1")])
+
+    # Assert
+    assert link_names(payload) == expected
+
+
+def test_tiles_should_default_to_the_either_link_policy(bigInteractLinks):
+    """Test the policy a links tileset takes when none is named.
+
+    Given:
+        A links tileset constructed with no ``link_policy``.
+    When:
+        The separating tile is served.
+    Then:
+        It should return what ``either`` returns. The default governs the
+        scan-versus-seek choice as well as the selection, so it is worth
+        pinning rather than reading off the signature.
+    """
+    # Arrange
+    tileset = BBIInteractionLinksTileset(
+        bigInteractLinks, tile_size=TILE_SIZE
+    )
+
+    # Act
+    (_, payload), = tileset.tiles([tileset.parse_tile_id("u.3.1")])
+
+    # Assert
+    assert link_names(payload) == ["near", "straddle"]
+
+
+@pytest.mark.parametrize(
+    "pos,expected",
+    [("1.1", ["near"]), ("1.0", []), ("0.2", ["spanner"])],
+)
+def test_tiles_should_place_an_interaction_in_its_own_2d_cell(
+    bigInteractLinks, pos, expected
+):
+    """Test that a 2D tile returns only the links both of its axes admit.
+
+    Given:
+        A bigInteract whose links put their two anchors in known tile columns.
+    When:
+        Cells on and off the diagonal are served.
+    Then:
+        Each should return only the link whose source falls in the x column
+        and whose target falls in the y column. The index query matches on the
+        hull, so it returns links the y filter must then reject -- the
+        ``(1, 0)`` cell is that case.
+    """
+    # Arrange
+    tileset = BBIInteraction2DTileset(bigInteractLinks, tile_size=TILE_SIZE)
+
+    # Act
+    (_, payload), = tileset.tiles([tileset.parse_tile_id(f"u.3.{pos}")])
+
+    # Assert
+    assert link_names(payload) == expected
+
+
+def test_tiles_should_refuse_a_2d_tile_whose_y_is_off_the_canvas(
+    bigInteractLinks,
+):
+    """Test the axis the restored bounds check is the only screen for.
+
+    Given:
+        A 2D tileset and a tile whose x exists but whose y is past the last
+        tile at that zoom.
+    When:
+        It is served.
+    Then:
+        It should return a ``TileOutOfBounds`` payload rather than an empty
+        tile. ``y`` reaches ``tile_span`` and nothing else, so this is the one
+        position the guard restored in ``TileCanvas`` is the sole check on --
+        and an unchecked one yields a well-formed range past the genome, zero
+        rows, and a tile a client cannot tell from "no interactions here".
+    """
+    # Arrange
+    tileset = BBIInteraction2DTileset(bigInteractLinks, tile_size=TILE_SIZE)
+
+    # Act
+    (_, payload), = tileset.tiles([tileset.parse_tile_id("u.3.1.99")])
+
+    # Assert
+    assert payload["error_type"] == "TileOutOfBounds"
+
+
+def test_to_interaction_should_rank_by_the_records_value_column():
+    """Test the importance an interact record carries in its own fields.
+
+    Given:
+        An 18-field record whose value column is numeric.
+    When:
+        It is converted.
+    Then:
+        Its importance should be that value, so a client ranks links the way
+        the file says rather than by an arbitrary digest.
+    """
+    # Act
+    record = to_interaction(interaction_tuple(value="7.5"), {"c1": 0})
+
+    # Assert
+    assert record["importance"] == 7.5
+
+
+def test_to_interaction_should_fall_back_to_the_digest_for_a_bad_value():
+    """Test a value column that is not a number, which interact permits.
+
+    Given:
+        An 18-field record whose value column is non-numeric.
+    When:
+        It is converted.
+    Then:
+        Its importance should be a stable digest in the unit interval rather
+        than raising -- ranking has to stay total over real files.
+    """
+    # Act
+    record = to_interaction(interaction_tuple(value="."), {"c1": 0})
+
+    # Assert
+    assert 0.0 <= record["importance"] < 1.0
+
+
+def test_to_interaction_should_return_none_when_an_anchor_is_unplaceable():
+    """Test a record naming a contig the coordinate system does not.
+
+    Given:
+        A record whose target anchor sits on an unknown contig.
+    When:
+        It is converted.
+    Then:
+        It should return ``None``. A ``KeyError`` here is not a ``TileError``,
+        so it would fail the whole batch rather than drop one link.
+    """
+    # Act
+    record = to_interaction(
+        interaction_tuple(target=("cUNKNOWN", 30, 40)), {"c1": 0}
+    )
+
+    # Assert
+    assert record is None
+
+
+def test_to_interaction_should_raise_when_the_record_is_not_bed5_plus_13():
+    """Test a bigBed that is not an interact file at all.
+
+    Given:
+        A record with fewer than eighteen fields.
+    When:
+        It is converted.
+    Then:
+        It should raise ``ValueError`` naming the schema, rather than reading
+        a target coordinate out of whichever column happens to be there.
+    """
+    # Act & assert
+    with pytest.raises(ValueError, match="bed5\\+13"):
+        to_interaction(interaction_tuple()[:16], {"c1": 0})
+
+
+def test_info_should_keep_the_type_specific_fields(bigwig):
+    """Test that deriving the padded info does not drop the extras.
+
+    Given:
+        A signal tileset, which advertises the aggregations and range modes
+        its modifier slot accepts.
+    When:
+        Its info is requested.
+    Then:
+        Those fields should survive alongside the padded range. Rebuilding the
+        model field by field is the obvious way to derive a variant of a frozen
+        model, and it silently drops everything the subclass contributed --
+        leaving a client with no way to know which modifiers it may ask for.
+    """
+    # Arrange
+    tileset = BBISignalTileset(bigwig, tile_size=TILE_SIZE)
+
+    # Act
+    served = tileset.info().to_dict()
+
+    # Assert
+    assert served["aggregation_modes"]
+    assert served["range_modes"]
+
+
+def test_tiles_should_hold_one_bin_per_tile_slot(bigwig):
+    """Test that the grid the tiles are cut from matches the info.
+
+    Given:
+        A signal tileset with a four-bin tile size.
+    When:
+        The whole-genome tile is served.
+    Then:
+        It should carry exactly four bins. This is the property the
+        cross-type conformance suite asserts for the legacy modules, reaching
+        the served payload through the same info the previous tests check --
+        an update that corrupts the ladder rather than the range shows up
+        here rather than there.
+    """
+    # Arrange
+    tileset = BBISignalTileset(bigwig, tile_size=TILE_SIZE)
+
+    # Act
+    (_, payload), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+    # Assert
+    assert bin_count(payload) == TILE_SIZE
+
+
+def test_tiles_should_return_nothing_when_the_cap_is_zero(bigbed):
+    """Test the record cap end to end, through a real tileset.
+
+    Given:
+        An annotation tileset over a bigBed holding three features, under a
+        policy capping records at zero.
+    When:
+        The whole-genome tile is served.
+    Then:
+        It should return no records. A server configured to serve none must
+        not emit an unbounded tile, and the slice that implements the cap
+        silently inverts at zero to mean "everything".
+    """
+    # Arrange
+    tileset = BBIAnnotationTileset(
+        bigbed, tile_size=TILE_SIZE, policy=TilePolicy(max_records=0)
+    )
+
+    # Act
+    (_, records), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+    # Assert
+    assert records == []
+
+
+def test_tiles_should_refuse_a_zero_cap_without_reading_the_file(
+    bigbed, tmp_path
+):
+    """Test that a cap of zero costs nothing, not merely that it serves nothing.
+
+    Given:
+        An annotation tileset over a copy of the file, capped at zero, whose
+        file is removed after construction.
+    When:
+        The whole-genome tile is served.
+    Then:
+        It should return no records rather than raising. A missing file is the
+        only way to observe the absence of I/O from outside: refusing after the
+        read costs every record fetched and digested -- seconds on a zoom-0
+        tile -- to produce an empty list.
+    """
+    # Arrange
+    path = tmp_path / "annot.bb"
+    path.write_bytes(pathlib.Path(bigbed).read_bytes())
+    tileset = BBIAnnotationTileset(
+        str(path), policy=TilePolicy(max_records=0), tile_size=TILE_SIZE
+    )
+    path.unlink()
+
+    # Act
+    (_, records), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+    # Assert
+    assert records == []
+
+
+def test_tiles_should_read_the_file_when_the_cap_is_not_zero(bigbed, tmp_path):
+    """Test the control for the refusal above, so it pins the short-circuit.
+
+    Given:
+        The same tileset over the same removed file, capped at one instead.
+    When:
+        The whole-genome tile is served.
+    Then:
+        It should raise, because it reaches the file. Without this, the test
+        above would pass against a build that never reads anything.
+    """
+    # Arrange
+    path = tmp_path / "annot.bb"
+    path.write_bytes(pathlib.Path(bigbed).read_bytes())
+    tileset = BBIAnnotationTileset(
+        str(path), policy=TilePolicy(max_records=1), tile_size=TILE_SIZE
+    )
+    path.unlink()
+
+    # Act & assert
+    with pytest.raises(OSError):
+        tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+
+def test_tiles_should_place_records_by_the_ordering_the_tile_selects(bigbed):
+    """Test the ``,cos:`` path against a tileset built on that ordering.
+
+    Given:
+        An annotation tileset carrying an alternate chromosome ordering, and a
+        second tileset built directly on that ordering.
+    When:
+        The whole-genome tile is served, selecting the alternate on the first.
+    Then:
+        Both should place the records identically. The alternate's info is now
+        built once at construction rather than per tile, and a memo that
+        handed back the wrong ordering's info would misplace every record
+        while still looking like a well-formed tile.
+    """
+    # Arrange
+    # Only the two contigs the fixture carries records for: pybigtools drops
+    # a contig with no records from the file's chrom list, and asking for one
+    # that is not there is a KeyError rather than an empty read.
+    default = Chromsizes(("c1", "c2"), (1000, 1500))
+    reordered = Chromsizes(("c2", "c1"), (1500, 1000))
+    tileset = BBIAnnotationTileset(
+        bigbed,
+        chromsizes=default,
+        chromsizes_alts={"alt": reordered},
+        tile_size=TILE_SIZE,
+    )
+    reference = BBIAnnotationTileset(
+        bigbed, chromsizes=reordered, tile_size=TILE_SIZE
+    )
+
+    # Act
+    (_, selected), = tileset.tiles(
+        [tileset.parse_tile_id("u.0.0,cos:alt")]
+    )
+    (_, expected), = reference.tiles([reference.parse_tile_id("u.0.0")])
+
+    # Assert
+    assert [r["xStart"] for r in selected] == [r["xStart"] for r in expected]
+    assert selected != []
+
+
+def test_to_bedlike_should_return_none_when_the_contig_is_unknown():
+    """Test the converter's own contig check. A regression guard, not a pin.
+
+    Given:
+        A raw record on a contig the offsets do not name.
+    When:
+        It is converted.
+    Then:
+        It should return ``None``. No call site in the tree can reach this --
+        records are named from the same chromsizes the offsets come from -- so
+        this guards the converter's contract rather than reproducing a defect.
+        The call site used to index the map directly, and a ``KeyError`` there
+        is not a ``TileError``, so it would have failed the whole batch.
+    """
+    # Act
+    record = to_bedlike(("cUNKNOWN", 10, 20), {"c1": 0})
+
+    # Assert
+    assert record is None
+
+
+def test_to_bedlike_should_place_a_record_on_a_known_contig():
+    """Test the converter's placing path, so the check above is not vacuous.
+
+    Given:
+        A raw record on a contig the offsets name.
+    When:
+        It is converted.
+    Then:
+        It should return a record positioned at that contig's offset.
+    """
+    # Act
+    record = to_bedlike(("c2", 10, 20), {"c1": 0, "c2": 1000})
+
+    # Assert
+    assert record is not None
+    assert (record["xStart"], record["xEnd"]) == (1010, 1020)
+
+
+def test_tiles_should_return_an_error_payload_for_a_tile_off_the_canvas(
+    bigwig,
+):
+    """Test that one bad position does not take the batch with it.
+
+    Given:
+        A batch of two tile ids, one inside the canvas and one past its last
+        tile.
+    When:
+        The batch is served.
+    Then:
+        Both entries should come back, the second an error payload naming the
+        refusal. A client batches sixteen tiles per request, and a single bad
+        position raising through ``tiles()`` discards the fifteen that were
+        servable.
+    """
+    # Arrange
+    tileset = BBISignalTileset(bigwig, tile_size=TILE_SIZE)
+    n_tiles = tileset.info().canvas(1).n_tiles
+    ids = [
+        tileset.parse_tile_id("u.1.0"),
+        tileset.parse_tile_id(f"u.1.{n_tiles}"),
+    ]
+
+    # Act
+    results = tileset.tiles(ids)
+
+    # Assert
+    assert bin_count(results[0][1]) == TILE_SIZE
+    assert results[1][1]["error_type"] == "TileOutOfBounds"
+
+
+def test_tiles_should_return_every_record_when_the_cap_is_none(bigbed):
+    """Test the uncapped path, which now runs through the same thinning call.
+
+    Given:
+        An annotation tileset under a policy naming no record cap.
+    When:
+        The whole-genome tile is served.
+    Then:
+        It should return every feature. The caller used to short-circuit on
+        ``None`` before reaching ``take_most_important``, which left two
+        surfaces encoding what ``None`` means and the callee's own branch dead
+        -- the one that would be missed when the rule changes.
+    """
+    # Arrange
+    tileset = BBIAnnotationTileset(
+        bigbed, tile_size=TILE_SIZE, policy=TilePolicy(max_records=None)
+    )
+
+    # Act
+    (_, records), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+    # Assert
+    assert len(records) == 3
+
+
+def test_tiles_should_digest_a_record_without_requiring_md5_for_security(
+    bigbed, monkeypatch
+):
+    """Test that the per-record digest survives a FIPS-enforcing build.
+
+    Given:
+        An annotation tileset, and an ``md5`` that refuses any call not marked
+        as non-security -- which is how a FIPS build behaves.
+    When:
+        A tile is served.
+    Then:
+        It should serve the records anyway. The flag was added to
+        ``stable_importance``, but the uid is digested first and passed in, so
+        this call raises before the marked one is ever reached and the
+        hardening never takes effect.
+    """
+    # Arrange
+    real_md5 = hashlib.md5
+
+    def fips_md5(*args, **kwargs):
+        if kwargs.get("usedforsecurity", True) is not False:
+            raise ValueError("md5 is not available in FIPS mode")
+        return real_md5(*args, **kwargs)
+
+    monkeypatch.setattr(hashlib, "md5", fips_md5)
+    tileset = BBIAnnotationTileset(bigbed, tile_size=TILE_SIZE)
+
+    # Act
+    (_, records), = tileset.tiles([tileset.parse_tile_id("u.0.0")])
+
+    # Assert
+    assert len(records) == 3
+
+
+def test_info_should_return_one_position_per_axis_for_a_2d_tileset(
+    bigInteract,
+):
     """Test the arity of the info a two-dimensional tileset serves.
 
     Given:
@@ -124,12 +726,12 @@ def test_info_should_return_one_position_per_axis_for_a_2d_tileset(bigbed):
     Then:
         ``min_pos`` and ``max_pos`` should each carry two entries. The client
         reads the y extent from ``max_pos[1]``, so a one-entry list leaves a
-        2D track with no second axis to lay out -- and nothing else in the
-        serving path reads these fields, so the served info is the only place
-        the mistake is visible.
+        2D track with no second axis to lay out -- and nothing in the serving
+        path reads these fields, so the served info is the only place the
+        mistake is visible.
     """
     # Arrange
-    tileset = BBIInteraction2DTileset(bigbed, tile_size=TILE_SIZE)
+    tileset = BBIInteraction2DTileset(bigInteract, tile_size=TILE_SIZE)
 
     # Act
     served = tileset.info().to_dict()
@@ -144,14 +746,14 @@ def test_info_should_return_one_position_per_axis_for_a_2d_tileset(bigbed):
     [
         (BBISignalTileset, "bigwig"),
         (BBIAnnotationTileset, "bigbed"),
-        (BBIInteractionLinksTileset, "bigbed"),
+        (BBIInteractionLinksTileset, "bigInteract"),
     ],
     ids=["signal", "annotation", "links"],
 )
 def test_info_should_return_a_single_position_for_a_1d_tileset(
     cls, fixture, request
 ):
-    """Test that the per-axis padding did not widen the one-dimensional types.
+    """Test that the per-axis padding did not widen the 1D types.
 
     Given:
         Each of the three tilesets that declare ``ndim = 1``.
@@ -179,8 +781,8 @@ def test_info_should_return_a_single_position_for_a_1d_tileset(
     [
         (BBISignalTileset, "bigwig"),
         (BBIAnnotationTileset, "bigbed"),
-        (BBIInteractionLinksTileset, "bigbed"),
-        (BBIInteraction2DTileset, "bigbed"),
+        (BBIInteractionLinksTileset, "bigInteract"),
+        (BBIInteraction2DTileset, "bigInteract"),
     ],
     ids=["signal", "annotation", "links", "interaction2d"],
 )
@@ -210,11 +812,11 @@ def test_info_should_describe_as_many_axes_as_the_tileset_declares(
     assert len(served["max_pos"]) == cls.ndim
 
 
-def test_info_should_pad_every_axis_to_the_quadtree_extent(bigbed):
+def test_info_should_pad_every_axis_to_the_quadtree_extent(bigInteract):
     """Test what each axis is padded *to*, not just how many there are.
 
     Given:
-        A 2D tileset over a genome of 2500 bp, whose quadtree extent is 4096.
+        A 2D tileset over a genome of 3000 bp, whose quadtree extent is 4096.
     When:
         Its info is requested.
     Then:
@@ -225,35 +827,11 @@ def test_info_should_pad_every_axis_to_the_quadtree_extent(bigbed):
         place.
     """
     # Arrange
-    tileset = BBIInteraction2DTileset(bigbed, tile_size=TILE_SIZE)
+    tileset = BBIInteraction2DTileset(bigInteract, tile_size=TILE_SIZE)
 
     # Act
     served = tileset.info().to_dict()
 
     # Assert
     assert served["max_pos"] == [served["max_width"]] * 2
-    assert served["max_width"] == QUADTREE_EXTENT > GENOME_LENGTH
-
-
-def test_info_should_keep_the_type_specific_fields(bigwig):
-    """Test that declaring the arity did not displace the extras beside it.
-
-    Given:
-        A bigWig signal tileset, the one type contributing extra info fields.
-    When:
-        Its info is requested.
-    Then:
-        It should still carry ``aggregation_modes`` and ``range_modes``. The
-        arity is passed as a keyword alongside those extras, so a collision
-        between the two is a ``TypeError`` at request time and a silent drop
-        is an API the client can no longer see.
-    """
-    # Arrange
-    tileset = BBISignalTileset(bigwig, tile_size=TILE_SIZE)
-
-    # Act
-    served = tileset.info().to_dict()
-
-    # Assert
-    assert served["aggregation_modes"]
-    assert served["range_modes"]
+    assert served["max_width"] == QUADTREE_EXTENT > sum(CHROMSIZES.values())
