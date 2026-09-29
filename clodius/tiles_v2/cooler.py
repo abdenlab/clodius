@@ -413,12 +413,24 @@ class CoolerTileset(BaseTileset):
     @property
     def file(self) -> h5py.File:
         if self._file is None:
-            self._file = h5py.File(self._path, "r")
-            if "resolutions" not in self._file:
-                raise ValueError(
-                    f"{self._path} has no 'resolutions' group. Legacy "
-                    "multi-resolution cooler files are served by cooler.py."
-                )
+            # Published only once the check has passed. Assigning `self._file`
+            # first left the bad file cached, so the refusal below fired
+            # exactly once and every later access raised a bare `KeyError`
+            # from the group lookup instead -- which is not a `TilesetError`,
+            # so a server answered the first request with a readable refusal
+            # and every retry with a 500.
+            file = h5py.File(self._path, "r")
+            try:
+                if "resolutions" not in file:
+                    raise ValueError(
+                        f"{self._path} has no 'resolutions' group. Legacy "
+                        "multi-resolution cooler files are served by "
+                        "cooler.py."
+                    )
+            except Exception:
+                file.close()
+                raise
+            self._file = file
         return self._file
 
     def close(self) -> None:

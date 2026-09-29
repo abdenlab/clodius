@@ -283,3 +283,30 @@ def test_tiles_should_not_open_a_reader_when_nothing_in_the_batch_is_servable(
     # Assert
     assert [payload["error"] for _, payload in served]
     assert opened == []
+
+
+def test_file_should_raise_the_same_error_every_time_there_is_no_resolutions(
+    fixture_path,
+):
+    """Test that a refusal stays a refusal instead of decaying.
+
+    Given:
+        A tileset over a cooler with no ``resolutions`` group, built with
+        explicit chromsizes so the constructor does not read the file.
+    When:
+        Its info is requested repeatedly.
+    Then:
+        It should raise the same ``ValueError`` every time. Caching the file
+        before checking it left the bad file in place, so the refusal fired
+        once and every later access raised a bare ``KeyError`` instead --
+        which is not a ``TilesetError``, so a server answered the first
+        request with a readable refusal and every retry with a 500.
+    """
+    # Arrange
+    legacy = fixture_path("Dixon2012-J1-NcoI-R1-filtered.100kb.multires.cool")
+    tileset = CoolerTileset(legacy, chromsizes=Chromsizes(("c1",), (1000,)))
+
+    # Act & assert
+    for _ in range(3):
+        with pytest.raises(ValueError, match="no 'resolutions' group"):
+            tileset.info()
