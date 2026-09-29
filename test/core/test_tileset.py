@@ -5,6 +5,12 @@ hands its ``options`` set to the parser, where ``None`` is the wire for
 "accept anything" -- so a tileset that declares it accepts no options must not
 have that collapse into the opposite. ``TilesetInfo`` caches derivations off
 its fields, which is only sound while the fields cannot move.
+
+A third concern rides along: every tileset in the package inherits this
+class's ``__repr__``, and the two families name their source differently --
+the readers that take a path or a factory keep a ``_src``, the SQLite-backed
+pair keep a ``_path``. Both arms are pinned here, since a tileset carrying
+neither is otherwise anonymous in the traceback that reports its failure.
 """
 
 from collections.abc import Hashable
@@ -35,6 +41,15 @@ class ClosedTileset(BaseTileset):
     """A tileset declaring that it recognizes no options at all."""
 
     ndim = 1
+
+
+class PathTileset(BaseTileset):
+    """A tileset that keeps a plain path, as the SQLite-backed pair do."""
+
+    ndim = 1
+
+    def __init__(self, path):
+        self._path = path
 
 
 class CosTileset(BaseTileset):
@@ -226,6 +241,74 @@ class TestBaseTileset:
         # Act & assert
         with pytest.raises(TilesetUnavailable, match="ndim"):
             tileset.parse_tile_id("abc.3.4")
+
+
+    def test___repr___should_name_only_the_class_when_there_is_no_source(self):
+        """Test the arm that every source-less tileset falls back to.
+
+        Given:
+            A tileset that keeps neither a source nor a path.
+        When:
+            It is rendered.
+        Then:
+            It should name its class alone, rather than raise
+            ``AttributeError`` from inside whatever traceback is already being
+            reported. Reading the attribute defensively is what makes an
+            instance whose own construction failed still describable.
+        """
+        # Act & assert
+        assert repr(ClosedTileset()) == "<ClosedTileset>"
+
+    def test___repr___should_name_the_path_when_the_tileset_keeps_one(self):
+        """Test the arm the SQLite-backed tilesets rely on.
+
+        Given:
+            A tileset that keeps a plain path rather than a source object.
+        When:
+            It is rendered.
+        Then:
+            It should name the path. Most of the package still stores a
+            ``_path``, so pinning only the source-object arm would leave the
+            branch those tilesets actually take unasserted.
+        """
+        # Act & assert
+        assert repr(PathTileset("/data/x.beddb")) == (
+            "<PathTileset /data/x.beddb>"
+        )
+
+    def test___repr___should_name_only_the_class_when_the_path_is_empty(self):
+        """Test the empty path, which is no more a source than a missing one.
+
+        Given:
+            A tileset constructed with an empty path.
+        When:
+            It is rendered.
+        Then:
+            It should name its class alone. Testing the attribute for
+            ``None`` rather than for emptiness rendered a dangling space --
+            ``<PathTileset >`` -- which reads as a formatting bug rather than
+            as the empty argument that caused it.
+        """
+        # Act & assert
+        assert repr(PathTileset("")) == "<PathTileset>"
+
+    def test___annotations___should_declare_the_source_attribute(self):
+        """Test the declaration that publishes where a source is kept.
+
+        Given:
+            The base class.
+        When:
+            Its annotations are read.
+        Then:
+            It should declare ``_src`` without assigning it, the way ``ndim``
+            is declared. ``__repr__`` reads that attribute by name, and a
+            backend adopting `Source` has nothing else telling it what to call
+            the attribute; an inherited default would instead let a tileset
+            with no source render as though it had one.
+        """
+        # Act & assert
+        assert "_src" in BaseTileset.__annotations__
+        assert not hasattr(BaseTileset, "_src")
 
 
 class TestTileset:

@@ -9,6 +9,7 @@ from typing import Any, ClassVar, Protocol, Self, Sequence, runtime_checkable
 from clodius.core.coords import TileCanvas, Chromsizes
 from clodius.core.tile import AnnotationRecord, TileKind
 from clodius.core.policies import TilePolicy
+from clodius.core.source import Source
 from clodius.core.tileid import ModifierSpec, TileId
 from clodius.core.errors import (
     TileError,
@@ -142,8 +143,45 @@ class BaseTileset:
     tile_size: int
     policy: TilePolicy
 
+    # Annotated, deliberately not assigned, for the same reason as `ndim`: it
+    # declares the name a tileset's source is kept under, so `__repr__` reads a
+    # published attribute rather than guessing at one, and so the next backend
+    # to adopt `Source` is told what to call it. A tileset that has no source
+    # -- a chromsizes dataset, a tileset built from an in-memory array -- never
+    # assigns it, which is what the absence of a default means here.
+    _src: Source
+
     modifiers: ClassVar[ModifierSpec | None] = None
     options: ClassVar[frozenset[str]] = frozenset()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def __repr__(self) -> str:
+        # `getattr` twice rather than one attribute, because the migration to
+        # `Source` is in flight: the tilesets that have adopted it keep a
+        # `_src`, and the ones whose backend slice has not landed yet still
+        # keep the `_path` they were written with. The second branch goes away
+        # when the last slice migrates. A tileset is otherwise anonymous in a
+        # traceback.
+        src = getattr(self, "_src", None)
+        if src is None:
+            src = getattr(self, "_path", None)
+        # Falsy rather than `is None`, so an empty `_path` takes this branch
+        # too -- it is no more a source than a missing one, and rendering it as
+        # `<BedTileset >` reads as a formatting bug rather than as the empty
+        # argument it is. A `Source` cannot be empty (its constructor refuses
+        # one) and has no `__bool__`, so for the migrated branch this test is
+        # equivalent to `is None`. `getattr` with a default covers the other
+        # end: an
+        # instance whose `__init__` raised before assigning reprs as its class
+        # instead of raising `AttributeError` from inside a traceback.
+        if not src:
+            return f"<{type(self).__name__}>"
+        return f"<{type(self).__name__} {src}>"
 
     def tiles(
         self,
@@ -203,13 +241,14 @@ class BaseTileset:
         )
 
     def close(self) -> None:
+        """Release whatever this tileset opened.
+
+        The ownership rule, which the source abstraction states in full: a
+        tileset closes what it opened and nothing else. A caller who supplies
+        a path or a factory supplies a recipe, not a resource, so there is
+        never a caller-owned handle for this to close by mistake.
+        """
         pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.close()
 
     def _tile(self, tid: TileId) -> TileKind:
         """One tile's payload, or raise a `TileError` refusing it.
