@@ -18,6 +18,7 @@ from clodius.core.policies import (
 )
 from clodius.core.tileid import TileId
 from clodius.core.tileset import BaseTileset, TilesetInfo
+from clodius.core.source import Source
 from clodius.tiles_v2._exprs import known_chroms
 from clodius.tiles_v2._index import indexed_contigs, screen_regions
 
@@ -74,7 +75,7 @@ class VariantFormat:
         return self.reader(path, compression=self.compression, **kwargs)
 
     def has_sibling_index(self, path: str) -> bool:
-        return any(os.path.exists(path + ext) for ext in self.index_suffixes)
+        return Source.coerce(path).has_sibling(*self.index_suffixes)
 
 
 VCF = VariantFormat("vcf", ox.from_vcf, "infer", (".tbi", ".csi"))

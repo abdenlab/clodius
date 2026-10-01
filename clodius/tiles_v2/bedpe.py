@@ -12,6 +12,7 @@ from clodius.core.tile import Annotation2DRecord
 from clodius.core.policies import TilePolicy, LinkPolicy
 from clodius.core.tileid import TileId
 from clodius.core.tileset import BaseTileset, TilesetInfo
+from clodius.core.source import Source
 from clodius.tiles_v2._exprs import known_chroms
 from clodius.tiles_v2._index import indexed_contigs, screen_regions
 
@@ -132,10 +133,6 @@ def to_paired(
     }
 
 
-def _has_sibling_index(path: str) -> bool:
-    return any(os.path.exists(path + ext) for ext in (".tbi", ".csi"))
-
-
 class _BedpeBase(BaseTileset):
     """Shared reading, geometry and thinning for the two BEDPE tilesets.
 
@@ -157,9 +154,9 @@ class _BedpeBase(BaseTileset):
     ):
         self._path = os.fspath(path)
         self._index_path = os.fspath(index_path) if index_path else None
-        self._is_indexed = self._index_path is not None or _has_sibling_index(
+        self._is_indexed = self._index_path is not None or Source.coerce(
             self._path
-        )
+        ).has_sibling(".tbi", ".csi")
         self._chromsizes = chromsizes
         self._known_chroms = known_chroms(chromsizes, "chrom", "chrom2")
         # What the index can be asked for; see `clodius.tiles_v2._index`.
