@@ -8,10 +8,11 @@ a constructor that orphaned its handle, an unlocked check-then-act, a reader
 dropped for the garbage collector rather than closed. It lives here instead,
 so a fix lands once and the next backend inherits it.
 
-That includes the constructor guard, which subclasses used to hand-write: a
-subclass does its construction work inside
-:meth:`FileBacked._releasing_on_error`, so a raise after the open releases
-what the open produced without each subclass remembering to arrange it.
+That includes the whole of construction, which subclasses used to hand-write:
+a subclass does its header read inside :meth:`FileBacked._configuring`, which
+releases what the read opened whether the block raises or returns. Both halves
+used to be the subclass's to remember, and the release half was three
+near-identical copies with a byte-identical rationale comment.
 
 There is no test module for this protocol. It is pinned once per backend
 instead, in `test/tiles_v2/test_bbi.py` and `test/tiles_v2/test_cooler.py`,
@@ -46,18 +47,29 @@ class FileBacked[_R](BaseTileset):
     through ``__getattr__`` on its Python wrapper and so satisfies the shape
     per instance rather than per class.
 
-    Opens lazily, on first access to :attr:`file`, so constructing a tileset
-    over an unreachable source is not itself an error.
+    Opens lazily, on first use of the reader, so constructing a tileset over
+    an unreachable source is not itself an error. :meth:`reading` is the only
+    public way in; the reader itself is not published, because for BBI it
+    carries a serialization constraint a caller holding the bare object has no
+    way to honor.
 
     *Registration is free.* A subclass that reads a header has opened the
-    source by the time construction returns, and closes again to hand the
-    descriptor -- or the caller's remote connection -- back. All three
-    backends do: a server registers tilesets it may never serve, and a
-    factory-backed one held open is a live remote connection per registered
-    dataset. `close` is idempotent and :attr:`file` reopens, so a served
-    tileset pays one more open and an unserved one pays none. Construction
-    still *reads* the header, so a source that is not this tileset's format is
-    still refused at registration rather than at the first request.
+    source by the time construction returns, and :meth:`_configuring` closes
+    again to hand the descriptor -- or the caller's remote connection -- back.
+    All three backends do: a server registers tilesets it may never serve, and
+    a factory-backed one held open is a live remote connection per registered
+    dataset. `close` is idempotent and the reader reopens, so a served tileset
+    pays one more open and an unserved one pays none.
+
+    Two limits on that, both measured. Construction still *reads* the header
+    where it needs one, so a source that is not this tileset's format is
+    refused at registration rather than at the first request -- but a caller
+    who supplies every header-derived parameter (``chromsizes`` for BBI and
+    cooler) skips the only read, and the refusal then moves to the first
+    request. And "free" ends at the first serve: nothing reaps a reader once
+    it has been used, so steady-state descriptor count equals the number of
+    *served* tilesets rather than zero. Measured at 300 served-and-retained
+    tilesets holding 300 descriptors, released only by `close`.
 
     **Ownership.** Where the reader accepts a path, a path-backed source is
     handed the path string, exactly as a reader that had never heard of
@@ -67,14 +79,14 @@ class FileBacked[_R](BaseTileset):
     read-only in the process and shares one descriptor across every tileset,
     which it cannot do for a Python file object. That reasoning is HDF5's and
     does not generalize: ``pybigtools`` shares nothing between readers of one
-    path either way -- measured at one descriptor per reader for both routes
-    -- so for BBI the path branch is a one-time saving of a few microseconds
-    rather than a per-descriptor one. Only a source the reader cannot take as
-    a path produces a handle, and that
-    handle is this tileset's to close, because this tileset is what opened it.
-    :meth:`close` releases both it and the reader, which do not release each
-    other: neither ``h5py.File.close()`` nor ``BBIReader.close()`` closes a
-    Python file object it was handed.
+    path either way -- measured at one descriptor per reader for both routes,
+    and at the same cost per open (0.017 ms each way), so for BBI the path
+    branch buys correct suffix dispatch and exemption from the read lock
+    rather than any saving. Only a source the reader cannot take as a path
+    produces a handle, and that handle is this tileset's to close, because
+    this tileset is what opened it. :meth:`close` releases both it and the
+    reader, which do not release each other: neither ``h5py.File.close()``
+    nor ``BBIReader.close()`` closes a Python file object it was handed.
 
     **Lifecycle.** :meth:`close` is idempotent, and a tileset reopens on next
     use -- `BaseTileset.__exit__` closes, and a tileset used again after its
@@ -93,15 +105,90 @@ class FileBacked[_R](BaseTileset):
         self._lock = threading.Lock()
 
     @contextmanager
-    def _releasing_on_error(self) -> Iterator[None]:
-        """Release what construction opened if the block raises.
+    def reading(self) -> Iterator[_R]:
+        """The reader, under whatever serialization this backend needs.
+
+        The only public route to the reader. What it yields may carry a
+        constraint the tileset is responsible for -- `BBITileset` serializes
+        reads through a handle it owns, because ``pybigtools`` holds a borrow
+        on it for the length of a query -- and a caller handed the bare reader
+        has no way to honor it. That is why the reader is not published.
+
+        This base imposes no serialization: HDF5 serializes its own calls.
+        In-package HDF5 callers therefore read through :meth:`_opened`
+        directly rather than entering this, which costs a generator per
+        access on a property that `_build_info` reads repeatedly.
+        """
+        yield self._opened()
+
+    def close(self) -> None:
+        """Release the reader and any handle this tileset opened."""
+        with self._lock:
+            try:
+                if self._reader is not None:
+                    self._reader.close()
+            finally:
+                # `finally`, because a failed reader close must not strand the
+                # handle: leaving `_reader` set would make every retry raise at
+                # the same point and the handle would never be reached again.
+                self._reader = None
+                handle, self._handle = self._handle, None
+                if handle is not None:
+                    handle.close()
+
+    def _opened(self) -> _R:
+        """The open reader, opening it on first access.
+
+        A method rather than a property, and private rather than public. The
+        name says what it returns: this is the reader, which is an
+        ``h5py.File`` as often as it is a ``pybigtools.BBIReader``, so naming
+        it for either one misdescribes it half the time.
+        """
+        # Double-checked: the unsynchronized read is the whole-lifetime common
+        # case, and the lock is what keeps a concurrent first access from
+        # calling the factory N times and leaving N-1 handles that `close` can
+        # no longer reach. A caller's handle has no finalizer to fall back on.
+        # Bound once, and returned from the binding. Reading the attribute
+        # again on the way out is a second, unsynchronized load, and a `close`
+        # landing between the two hands the caller `None` through a signature
+        # that promises a reader. The read inside the lock makes the result
+        # non-`None` by construction.
+        #
+        # What this does NOT make safe is closing a tileset while another
+        # thread is reading through the reference it already has: this path is
+        # deliberately unlocked, so the reader this returns can be closed
+        # while a caller is still reading through it, which surfaces as the
+        # backend's own closed-file error.
+        # Widening the lock to cover the caller's use would serialize every
+        # reader to fix a caller error, so it is not done -- a tileset closed
+        # concurrently with a request is the caller's race, not this class's.
+        #
+        # `close` also waits on an open already in flight, since both take
+        # `_lock`. For a factory with no timeout of its own that wait is
+        # unbounded; a server that needs a bounded shutdown owns that timeout.
+        reader = self._reader
+        if reader is None:
+            with self._lock:
+                if self._reader is None:
+                    self._open()
+                reader = self._reader
+        return reader
+
+    @contextmanager
+    def _configuring(self) -> Iterator[None]:
+        """Run construction work, then release whatever it opened.
 
         A subclass that reads a header does it inside this, after
         ``super().__init__(source)``::
 
             super().__init__(source)
-            with self._releasing_on_error():
-                self.tile_size = tile_size or self.file["info"].attrs["..."]
+            with self._configuring():
+                self.tile_size = tile_size or self._opened()["info"].attrs[...]
+
+        Both exits release. On a raise that is cleanup; on a normal return it
+        is the "registration is free" property in the class docstring, which
+        every backend used to implement by hand with a trailing
+        ``self.close()`` under a byte-identical comment.
 
         A context manager rather than a hook the base calls: a hook takes no
         arguments, so every subclass had to copy its constructor arguments
@@ -133,77 +220,26 @@ class FileBacked[_R](BaseTileset):
             except Exception:
                 pass
             raise
-
-    @contextmanager
-    def reading(self) -> Iterator[_R]:
-        """The reader, under whatever serialization this backend needs.
-
-        The seam a caller reaching past :meth:`tiles` should use. The reader
-        this yields may carry a constraint the tileset is responsible for --
-        `BBITileset` serializes reads through a handle it owns, because
-        ``pybigtools`` holds a borrow on it for the length of a query -- and
-        a caller driving the reader directly has no other way to honor it.
-
-        This base imposes none: HDF5 serializes its own calls.
-        """
-        yield self.file
-
-    @property
-    def file(self) -> _R:
-        """The open reader, opening it on first access."""
-        # Double-checked: the unsynchronized read is the whole-lifetime common
-        # case, and the lock is what keeps a concurrent first access from
-        # calling the factory N times and leaving N-1 handles that `close` can
-        # no longer reach. A caller's handle has no finalizer to fall back on.
-        # Bound once, and returned from the binding. Reading the attribute
-        # again on the way out is a second, unsynchronized load, and a `close`
-        # landing between the two hands the caller `None` through a signature
-        # that promises a reader. The read inside the lock makes the result
-        # non-`None` by construction.
-        #
-        # What this does NOT make safe is closing a tileset while another
-        # thread is reading through the reference it already has: this path is
-        # deliberately unlocked, so the reader this returns can be closed
-        # while a caller is still reading through it, which surfaces as the
-        # backend's own closed-file error.
-        # Widening the lock to cover the caller's use would serialize every
-        # reader to fix a caller error, so it is not done -- a tileset closed
-        # concurrently with a request is the caller's race, not this class's.
-        #
-        # `close` also waits on an open already in flight, since both take
-        # `_lock`. For a factory with no timeout of its own that wait is
-        # unbounded; a server that needs a bounded shutdown owns that timeout.
-        reader = self._reader
-        if reader is None:
-            with self._lock:
-                if self._reader is None:
-                    self._open()
-                reader = self._reader
-        return reader
-
-    def close(self) -> None:
-        """Release the reader and any handle this tileset opened."""
-        with self._lock:
-            try:
-                if self._reader is not None:
-                    self._reader.close()
-            finally:
-                # `finally`, because a failed reader close must not strand the
-                # handle: leaving `_reader` set would make every retry raise at
-                # the same point and the handle would never be reached again.
-                self._reader = None
-                handle, self._handle = self._handle, None
-                if handle is not None:
-                    handle.close()
+        # A second, deliberately separate suppression. The release on this path
+        # is an optimization rather than a correctness requirement, so it must
+        # not be able to fail a constructor that otherwise succeeded -- and
+        # `close` detaches `_handle` before closing it, so a raise here would
+        # also lose the only reference to the handle. Written out rather than
+        # folded into a `finally` with the arm above, because one shared
+        # suppression would let a test of either path cover both.
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def _open(self) -> None:
         """Open the source and publish it, or release what was opened."""
         # See the ownership note in the class docstring for why a path the
         # reader accepts is not merely equivalent to a handle opened from it.
         #
-        # `Source.path` rather than `Source.for_reader()`: the latter is
-        # oxbow's union and returns the *factory* for a pathless source, which
-        # is a shape no reader here accepts.
+        # `Source.path` is handed over unchanged -- the identical string
+        # object the caller passed, which is what makes the path branch the
+        # same call it was before this module existed.
         handle = self._src.open() if self._needs_handle() else None
         target = handle if handle is not None else self._src.path
         if target is None:

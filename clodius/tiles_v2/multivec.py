@@ -10,11 +10,11 @@ import numpy as np
 
 from clodius.core.coords import Chromsizes, GenomicRange
 from clodius.core.errors import MalformedTileId, TileError
-from clodius.core.tile import DenseTile, DenseTilePayload, TileKind
 from clodius.core.policies import TilePolicy, reconcile
+from clodius.core.source import SourceLike
+from clodius.core.tile import DenseTile, DenseTilePayload, TileKind
 from clodius.core.tileid import TileId
 from clodius.core.tileset import TilesetInfo
-from clodius.core.source import SourceLike
 from clodius.tiles_v2._h5 import H5Backed
 
 
@@ -63,15 +63,17 @@ class MultivecTileset(H5Backed):
 
     Parameters
     ----------
-    source : str, os.PathLike, or callable
+    source : str, bytes, os.PathLike, Source, or callable
         Where the file's bytes come from: a filesystem path, or a
         zero-argument callable returning a freshly opened, seekable binary
         handle each time it is called (``lambda: fs.open(url, "rb")`` and
         ``lambda: open(p, "rb")`` both qualify). An already-open file is
         refused, because the obvious repair -- wrapping it as
         ``lambda: handle`` -- returns the same exhausted handle on every call.
-        A path is handed to ``h5py`` unchanged; a handle this tileset opened is
-        closed by :meth:`close`.
+        An already-normalized `clodius.core.source.Source` is accepted too, so
+        a caller who coerced once can reuse the result. A path is handed to
+        ``h5py`` unchanged; a handle this tileset opened is closed by
+        :meth:`close`.
     policy : TilePolicy, optional
         Limits applied when serving. Defaults to `TilePolicy`'s own defaults.
     tile_size : int, optional
@@ -94,23 +96,17 @@ class MultivecTileset(H5Backed):
         super().__init__(source)
         # The `tile-size` read opens the file, and a file that is valid HDF5
         # but not a multivec raises after that open succeeded; the block
-        # below releases what the open produced.
-        with self._releasing_on_error():
+        # releases what the open produced either way.
+        with self._configuring():
             self.policy = policy or TilePolicy()
             self.tile_size = tile_size or int(
-                self.file["info"].attrs["tile-size"]
+                self._opened()["info"].attrs["tile-size"]
             )
-            # Hand back whatever the header read opened, as every backend
-            # over `FileBacked` does. A server registers tilesets it may
-            # never serve, and for a factory source each one it holds is a
-            # live remote connection. `file` reopens on next use, so a served
-            # tileset pays one extra open and an unserved one pays nothing.
-            self.close()
 
     # --- ProvidesChromsizes -------------------------------------------------
 
     def chromsizes(self) -> Chromsizes:
-        chroms = self.file["chroms"]
+        chroms = self._opened()["chroms"]
         names = tuple(
             n.decode("utf8") if isinstance(n, bytes) else n
             for n in chroms["name"][:]
@@ -122,7 +118,9 @@ class MultivecTileset(H5Backed):
     @property
     def resolutions(self) -> tuple[int, ...]:
         return tuple(
-            sorted((int(r) for r in self.file["resolutions"]), reverse=True)
+            sorted(
+                (int(r) for r in self._opened()["resolutions"]), reverse=True
+            )
         )
 
     def info(self) -> TilesetInfo:
@@ -171,7 +169,7 @@ class MultivecTileset(H5Backed):
         )
 
     def _n_rows(self, resolution: int) -> int:
-        grp = self.file[f"resolutions/{resolution}/values"]
+        grp = self._opened()[f"resolutions/{resolution}/values"]
         first = next(iter(grp))
         return int(grp[first].shape[1])
 
@@ -183,14 +181,15 @@ class MultivecTileset(H5Backed):
         tolerance without the nesting.
         """
         out = {}
-        info_group = self.file.get("info")
+        info_group = self._opened().get("info")
         if info_group is not None:
             for key in ("row_infos", "category_infos"):
                 if key in info_group:
                     out[key] = _decode_json(info_group[key][()])
 
         if "row_infos" not in out:
-            attrs = self.file["resolutions"][str(self.resolutions[0])].attrs
+            first = str(self.resolutions[0])
+            attrs = self._opened()["resolutions"][first].attrs
             if "row_infos" in attrs:
                 out["row_infos"] = [_decode_json(r) for r in attrs["row_infos"]]
         return out
@@ -200,7 +199,7 @@ class MultivecTileset(H5Backed):
         canvas = info.canvas(tid.z)
         binsize = int(canvas.binsize)
         n_rows = info.shape[1]
-        grp = self.file[f"resolutions/{binsize}/values"]
+        grp = self._opened()[f"resolutions/{binsize}/values"]
 
         chunks = [
             (fetch(grp, gr, binsize, n_rows), gr.end - gr.start)
