@@ -49,8 +49,12 @@ import io
 import os
 from typing import IO, Callable
 
-#: What a tileset will accept wherever it used to take a path.
-SourceLike = str | bytes | os.PathLike | Callable[[], IO[bytes]]
+#: What a tileset will accept wherever it used to take a path. ``Source`` is
+#: a member because `Source.coerce` passes an already-normalized one straight
+#: back out, and `Source.sibling` and `Source.optional` both return one -- so
+#: a caller who normalizes once and reuses the result was writing code the
+#: annotation rejected and the runtime accepted.
+SourceLike = str | bytes | os.PathLike | Callable[[], IO[bytes]] | "Source"
 
 
 class Source:
@@ -144,7 +148,7 @@ class Source:
         return self._path
 
     @classmethod
-    def coerce(cls, obj: SourceLike | Source) -> Source:
+    def coerce(cls, obj: SourceLike) -> Source:
         """Normalize whatever a constructor was handed.
 
         Accepts a path, a factory, or an already-normalized ``Source`` -- the
@@ -189,7 +193,7 @@ class Source:
         )
 
     @classmethod
-    def optional(cls, obj: SourceLike | Source | None) -> Source | None:
+    def optional(cls, obj: SourceLike | None) -> Source | None:
         """:meth:`coerce`, but ``None`` passes through.
 
         For the companion inputs -- an index, a reference, a ``.fai`` -- which
@@ -219,10 +223,18 @@ class Source:
         something else entirely.
         """
         if self._path is not None:
-            # Unbuffered: every consumer of this handle (h5py, pybigtools) does
-            # its own block caching, and HDF5's access pattern invalidates an
+            # Unbuffered for HDF5's sake: its access pattern invalidates an
             # 8 KiB Python buffer on nearly every read, so the layer costs a
             # fill and a copy and saves nothing.
+            #
+            # It is NOT free for every consumer, and the claim that it was
+            # used to name pybigtools here too. Measured, pybigtools reads in
+            # ~267-byte chunks with a seek before each, which is exactly what
+            # a Python buffer coalesces: 512 reads and 505 seeks unbuffered
+            # against 22 and 4 buffered, for one 15-tile batch. No wall-clock
+            # difference on a warm page cache -- the amplification only costs
+            # where a read is a round trip, on NFS or a FUSE mount -- so this
+            # stays as it is, with the reason corrected rather than widened.
             return open(self._path, "rb", buffering=0)
         handle = self._factory()
         try:
