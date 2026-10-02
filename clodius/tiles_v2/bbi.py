@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-
+from typing import IO
 
 import numpy as np
 import pybigtools
@@ -14,6 +14,7 @@ from clodius.core.policies import (
     stable_importance,
     take_most_important,
 )
+from clodius.core.source import SourceLike
 from clodius.core.tile import (
     Annotation2DRecord,
     AnnotationRecord,
@@ -21,9 +22,14 @@ from clodius.core.tile import (
     DenseTilePayload,
 )
 from clodius.core.tileid import ModifierSpec, TileId
-from clodius.core.tileset import BaseTileset, TilesetInfo
+from clodius.core.tileset import TilesetInfo
+from clodius.tiles_v2._backed import FileBacked
 
 TILE_SIZE = 1024
+
+#: The suffixes `pybigtools.open` dispatches on. A path ending in anything
+#: else has to be opened here and handed over as a live handle.
+BBI_SUFFIXES = (".bw", ".bigwig", ".bb", ".bigbed")
 
 AGGREGATION_MODES = {
     "mean": "Mean",
@@ -45,76 +51,97 @@ RANGE_MODES = {
 MAX_RANGES_PER_TILE = 128
 
 
-class BBITileset(BaseTileset):
-    """Shared plumbing: the file handle, the chromsizes and the info.
+class BBITileset(FileBacked[pybigtools.BBIReader]):
+    """Shared plumbing: the reader, the chromsizes and the info.
 
     Neither concrete tileset differs in how a BBI file is opened, what its
     coordinate space is, or how alternate chromosome orderings are selected --
     only in what it reads out of the file.
+
+    Parameters
+    ----------
+    source : str, os.PathLike, or callable
+        Where the file's bytes come from: a filesystem path, or a
+        zero-argument callable returning a freshly opened, seekable binary
+        handle each time it is called (``lambda: fs.open(url, "rb")`` and
+        ``lambda: open(p, "rb")`` both qualify). An already-open file is
+        refused, because the obvious repair -- wrapping it as
+        ``lambda: handle`` -- returns the same exhausted handle on every call.
+        A path whose suffix ``pybigtools`` recognizes is handed over unchanged;
+        any other source is opened here, and :meth:`close` closes what it
+        opened.
+    chromsizes : Chromsizes, optional
+        The coordinate system to serve against. Read from the file's own
+        header when omitted, which costs one open at construction.
+    chromsizes_alts : dict of str to Chromsizes, optional
+        Alternate orderings a tile may select with ``,cos:<uid>``. Each one's
+        info is built at construction, so they are fixed configuration rather
+        than something a request can grow.
+    policy : TilePolicy, optional
+        Limits applied when serving. Defaults to `TilePolicy`'s own defaults.
+    tile_size : int, optional [default: 1024]
+        Bins per tile.
     """
 
     ndim = 1
 
     def __init__(
         self,
-        path,
+        source: SourceLike,
         chromsizes: Chromsizes | None = None,
         chromsizes_alts: dict[str, Chromsizes] | None = None,
         policy: TilePolicy | None = None,
         tile_size: int = TILE_SIZE,
     ):
-        self._path = path
-        self._file = None
-        self._handle = None
-        self.policy = policy or TilePolicy()
-        self.tile_size = tile_size
-        if chromsizes is not None:
-            self._chromsizes = chromsizes
-        else:
-            chroms = self.file.chroms()
-            names = natsorted(chroms.keys())
-            self._chromsizes = Chromsizes(
-                tuple(names), tuple(chroms[n] for n in names)
-            )
-        # Alternate pre-defined chromsizes orderings. The client can select
-        # these per tile via `,cos:<uid>`.
-        self._chromsizes_alts = chromsizes_alts or {}
-        self._info = self._build_info(self._chromsizes)
-        # Built eagerly, for the same reason `self._info` is: rebuilding runs a
-        # full quadtree validation and hands back a cold `coordinate_system`,
-        # which `canvas()` then pays to rebuild. The alternates are fixed at
-        # construction, so this memo is bounded by configuration and cannot
-        # grow with request volume.
-        self._info_alts = {
-            uid: self._build_info(cs)
-            for uid, cs in self._chromsizes_alts.items()
-        }
+        super().__init__(source)
+        # Everything below can touch `self.file`, and a raise after it opened
+        # would strand what it opened: the caller never receives the object, so
+        # nothing is left to call `close` on. `close` is idempotent and
+        # null-safe, so this covers whatever a later slice adds here too.
+        try:
+            self.policy = policy or TilePolicy()
+            self.tile_size = tile_size
+            if chromsizes is not None:
+                self._chromsizes = chromsizes
+            else:
+                chroms = self.file.chroms()
+                names = natsorted(chroms.keys())
+                self._chromsizes = Chromsizes(
+                    tuple(names), tuple(chroms[n] for n in names)
+                )
+            # Alternate pre-defined chromsizes orderings. The client can select
+            # these per tile via `,cos:<uid>`.
+            self._chromsizes_alts = chromsizes_alts or {}
+            self._info = self._build_info(self._chromsizes)
+            # Built eagerly, for the same reason `self._info` is: rebuilding
+            # runs a full quadtree validation and hands back a cold
+            # `coordinate_system`, which `canvas()` then pays to rebuild. The
+            # alternates are fixed at construction, so this memo is bounded by
+            # configuration and cannot grow with request volume.
+            self._info_alts = {
+                uid: self._build_info(cs)
+                for uid, cs in self._chromsizes_alts.items()
+            }
+        except Exception:
+            self.close()
+            raise
 
     # --- resource lifetime --------------------------------------------------
 
-    @property
-    def file(self):
-        if self._file is None:
-            # pybigtools dispatches on the extension, so a bigInteract (or any
-            # other bigBed flavour) has to be handed an open file instead.
-            suffix = str(self._path).lower()
-            if not suffix.endswith((".bw", ".bigwig", ".bb", ".bigbed")):
-                self._handle = open(self._path, "rb")
-                self._file = pybigtools.open(self._handle)
-                return self._file
-            # Accepts a path directly. The legacy bigBed module calls
-            # `bbpath.seek(0)` on whatever it is handed, so `tiles(<str>, ...)`
-            # raises AttributeError -- masked because the test that would catch
-            # it is skipped as obsolete (test/tiles/bigbed_test.py:9).
-            self._file = pybigtools.open(self._path)
-        return self._file
+    def _reader_open(self, target: str | IO[bytes]) -> pybigtools.BBIReader:
+        # Takes a path directly, where the suffix allows one. The legacy
+        # bigBed module calls `bbpath.seek(0)` on whatever it is handed, so
+        # `tiles(<path>, ...)` raises AttributeError there -- masked because
+        # the test that would catch it is skipped as obsolete
+        # (test/tiles/bigbed_test.py:9).
+        return pybigtools.open(target)
 
-    def close(self) -> None:
-        self._file = None
-        handle = getattr(self, "_handle", None)
-        if handle is not None:
-            handle.close()
-            self._handle = None
+    def _needs_handle(self) -> bool:
+        # `pybigtools.open` dispatches on the extension, so a bigInteract (or
+        # any other bigBed flavour) has to be handed an open file instead. A
+        # factory-backed source has no path to dispatch on at all.
+        path = self._src.path
+        return path is None or not path.lower().endswith(BBI_SUFFIXES)
 
     # --- ProvidesChromsizes -------------------------------------------------
 
@@ -458,7 +485,17 @@ class BBIInteraction2DTileset(BBIInteractionTileset):
 
 
 class BBIInteractionLinksTileset(BBIInteractionTileset):
-    """A bigInteract served as 1D links, for an arc-style track."""
+    """A bigInteract served as 1D links, for an arc-style track.
+
+    Parameters
+    ----------
+    link_policy : LinkPolicy, optional [default: EITHER]
+        Which interactions a tile keeps: those with both anchors in view,
+        either one, or every interaction whose hull crosses it.
+
+    See `BBITileset` for the parameters every BBI tileset shares, ``source``
+    among them.
+    """
 
     ndim = 1
     datatype = "bedlike"
