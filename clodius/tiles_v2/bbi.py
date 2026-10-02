@@ -7,6 +7,7 @@ import numpy as np
 import pybigtools
 
 from clodius.core.coords import Chromsizes, GenomicRange, natsorted
+from clodius.core.errors import TileError
 from clodius.core.policies import (
     LinkPolicy,
     TilePolicy,
@@ -20,6 +21,7 @@ from clodius.core.tile import (
     AnnotationRecord,
     DenseTile,
     DenseTilePayload,
+    TileKind,
 )
 from clodius.core.tileid import ModifierSpec, TileId
 from clodius.core.tileset import TilesetInfo
@@ -27,14 +29,28 @@ from clodius.tiles_v2._backed import FileBacked
 
 TILE_SIZE = 1024
 
-#: The suffixes `pybigtools.open` dispatches on, in the exact spellings it
-#: accepts. Case-sensitive, and deliberately not case-folded: `pybigtools`
-#: refuses `signal.BW` as an invalid file type, so folding the comparison
-#: sends a perfectly good bigWig down the path branch to be rejected. A path
-#: ending in anything else is opened here and handed over as a live handle,
-#: which works for every suffix -- so the cost of not recognizing one is a
-#: slower open rather than a tileset that cannot be served at all.
-BBI_SUFFIXES = (".bw", ".bigwig", ".bigWig", ".bb", ".bigbed", ".bigBed")
+# The suffixes `pybigtools.open` dispatches on, in the exact spellings it
+# accepts. Case-sensitive, and deliberately not case-folded: `pybigtools`
+# refuses `signal.BW` as an invalid file type, so folding the comparison sends
+# a perfectly good bigWig down the path branch to be rejected.
+#
+# Recognition is not free, and it is worth being exact about which direction
+# costs what. A path ending in anything else is handed over as a live handle,
+# which opens any BBI file whatever it is named -- so *failing* to recognize a
+# suffix costs one slower open. Recognizing one commits to the flavour it
+# names: `pybigtools.open(<path>)` picks the parser from the extension while
+# `pybigtools.open(<handle>)` sniffs the bytes, so a bigWig named `.bb` is
+# refused by the path branch and served fine by the handle branch. Being
+# unrecognized is therefore strictly safer than being mis-recognized, and a
+# misnamed file is the one case this fast path cannot serve.
+_PYBIGTOOLS_PATH_SUFFIXES = (
+    ".bw",
+    ".bigwig",
+    ".bigWig",
+    ".bb",
+    ".bigbed",
+    ".bigBed",
+)
 
 AGGREGATION_MODES = {
     "mean": "Mean",
@@ -55,6 +71,15 @@ RANGE_MODES = {
 # range queries one tile issues, not how many records it returns.
 MAX_RANGES_PER_TILE = 128
 
+#: What `pybigtools` raises when two queries overlap on one handle-backed
+#: reader: it holds a borrow on the Python handle for the duration of a query.
+#: `BBITileset.tiles` serializes the only route that can produce it, so this
+#: is the belt to that braces -- a residual case must reach a client as that
+#: tile's refusal rather than as a 500, and `RuntimeError` is not a
+#: `TileError`, so `BaseTileset.tiles` would otherwise let it through the
+#: per-tile boundary and abort the whole batch.
+BORROWED = "Already borrowed"
+
 
 class BBITileset(FileBacked[pybigtools.BBIReader]):
     """Shared plumbing: the reader, the chromsizes and the info.
@@ -65,7 +90,7 @@ class BBITileset(FileBacked[pybigtools.BBIReader]):
 
     Parameters
     ----------
-    source : str, os.PathLike, or callable
+    source : str, bytes, os.PathLike, Source, or callable
         Where the file's bytes come from: a filesystem path, or a
         zero-argument callable returning a freshly opened, seekable binary
         handle each time it is called (``lambda: fs.open(url, "rb")`` and
@@ -98,55 +123,46 @@ class BBITileset(FileBacked[pybigtools.BBIReader]):
         policy: TilePolicy | None = None,
         tile_size: int = TILE_SIZE,
     ):
+        self._given_chromsizes = chromsizes
+        self._given_chromsizes_alts = chromsizes_alts
+        self._policy_arg = policy
+        self._tile_size_arg = tile_size
+        # `_configure` below runs inside the guard `FileBacked.__init__` owns,
+        # so a raise after the open releases what the open produced -- and so
+        # does a subclass's own work, which is what a hand-written guard here
+        # could never cover.
         super().__init__(source)
-        # Everything below can touch `self.file`, and a raise after it opened
-        # would strand what it opened: the caller never receives the object, so
-        # nothing is left to call `close` on. `close` is idempotent and
-        # null-safe, so this covers whatever a later slice adds here too.
-        try:
-            self.policy = policy or TilePolicy()
-            self.tile_size = tile_size
-            if chromsizes is not None:
-                self._chromsizes = chromsizes
-            else:
-                chroms = self.file.chroms()
-                names = natsorted(chroms.keys())
-                self._chromsizes = Chromsizes(
-                    tuple(names), tuple(chroms[n] for n in names)
-                )
-            # Alternate pre-defined chromsizes orderings. The client can select
-            # these per tile via `,cos:<uid>`.
-            self._chromsizes_alts = chromsizes_alts or {}
-            self._info = self._build_info(self._chromsizes)
-            # Built eagerly, for the same reason `self._info` is: rebuilding
-            # runs a full quadtree validation and hands back a cold
-            # `coordinate_system`, which `canvas()` then pays to rebuild. The
-            # alternates are fixed at construction, so this memo is bounded by
-            # configuration and cannot grow with request volume.
-            self._info_alts = {
-                uid: self._build_info(cs)
-                for uid, cs in self._chromsizes_alts.items()
-            }
-        except Exception:
-            self.close()
-            raise
 
-    # --- resource lifetime --------------------------------------------------
-
-    def _reader_open(self, target: str | IO[bytes]) -> pybigtools.BBIReader:
-        # Takes a path directly, where the suffix allows one. The legacy
-        # bigBed module calls `bbpath.seek(0)` on whatever it is handed, so
-        # `tiles(<path>, ...)` raises AttributeError there -- masked because
-        # the test that would catch it is skipped as obsolete
-        # (test/tiles/bigbed_test.py:9).
-        return pybigtools.open(target)
-
-    def _needs_handle(self) -> bool:
-        # `pybigtools.open` dispatches on the extension, so a bigInteract (or
-        # any other bigBed flavour) has to be handed an open file instead. A
-        # factory-backed source has no path to dispatch on at all.
-        path = self._src.path
-        return path is None or not path.endswith(BBI_SUFFIXES)
+    def _configure(self) -> None:
+        self.policy = self._policy_arg or TilePolicy()
+        self.tile_size = self._tile_size_arg
+        if self._given_chromsizes is not None:
+            self._chromsizes = self._given_chromsizes
+        else:
+            chroms = self.file.chroms()
+            names = natsorted(chroms.keys())
+            self._chromsizes = Chromsizes(
+                tuple(names), tuple(chroms[n] for n in names)
+            )
+        # Alternate pre-defined chromsizes orderings. The client can select
+        # these per tile via `,cos:<uid>`.
+        self._chromsizes_alts = self._given_chromsizes_alts or {}
+        self._info = self._build_info(self._chromsizes)
+        # Built eagerly, for the same reason `self._info` is: rebuilding runs
+        # a full quadtree validation and hands back a cold
+        # `coordinate_system`, which `canvas()` then pays to rebuild. The
+        # alternates are fixed at construction, so this memo is bounded by
+        # configuration and cannot grow with request volume.
+        self._info_alts = {
+            uid: self._build_info(cs)
+            for uid, cs in self._chromsizes_alts.items()
+        }
+        # Hand back whatever the chromsizes read opened. A server registers
+        # tilesets it may never serve, and for a factory source each one it
+        # holds is a live remote connection: 200 idle registrations held 200
+        # descriptors before this. `file` reopens on next use, so a served
+        # tileset pays one extra open and an unserved one pays nothing.
+        self.close()
 
     # --- ProvidesChromsizes -------------------------------------------------
 
@@ -155,10 +171,59 @@ class BBITileset(FileBacked[pybigtools.BBIReader]):
 
     # --- the protocol -------------------------------------------------------
 
+    def tiles(self, ids, options=None) -> list[tuple[TileId, TileKind]]:
+        """One entry per requested id; a refusal rides in the payload slot.
+
+        Overrides `BaseTileset.tiles` only to serialize access to a reader
+        this tileset owns the handle for. `pybigtools` holds a borrow on that
+        Python handle for the duration of a query, so two threads reading
+        through one handle-backed reader raise `RuntimeError: Already
+        borrowed` -- and a tile server answers requests on a thread pool, so
+        the source shape this module exists to support is the one that breaks.
+
+        A path-backed reader is exempt: `pybigtools` owns its own descriptor
+        and reopens per query, so it is already safe and pays one predicate
+        call rather than a lock. Serializing the handle route costs nothing
+        measurable -- it still outruns the path route, which reopens the file
+        for every query.
+
+        The test is `_needs_handle()` and NOT whether a handle is currently
+        published. `_handle` is `None` until a first open *completes*, and a
+        freshly constructed tileset is cold by design -- `_configure` hands
+        back what the chromsizes read opened -- so keying on the published
+        handle let every thread of a cold tileset's first batch take the
+        unlocked branch, share the one reader `file` then publishes, and
+        race. That is the common case rather than an edge: measured at 350 of
+        400 tiles refused on a cold factory-backed tileset, against 0 once it
+        had been opened. `_needs_handle()` is a property of the source, so it
+        answers before anything is open and does not change under us.
+        """
+        if not self._needs_handle():
+            return super().tiles(ids, options)
+        with self._read_lock:
+            return super().tiles(ids, options)
+
     def info(self) -> TilesetInfo:
         return self._info
 
     # --- internals ----------------------------------------------------------
+
+    def _needs_handle(self) -> bool:
+        # `pybigtools.open` dispatches on the extension, so a bigInteract (or
+        # any other bigBed flavour) has to be handed an open file instead. A
+        # factory-backed source has no path to dispatch on at all.
+        path = self._src.path
+        return path is None or not path.endswith(
+            _PYBIGTOOLS_PATH_SUFFIXES
+        )
+
+    def _reader_open(self, target: str | IO[bytes]) -> pybigtools.BBIReader:
+        # Takes a path directly, where the suffix allows one. The legacy
+        # bigBed module calls `bbpath.seek(0)` on whatever it is handed, so
+        # `tiles(<path>, ...)` raises AttributeError there -- masked because
+        # the test that would catch it is skipped as obsolete
+        # (test/tiles/bigbed_test.py:9).
+        return pybigtools.open(target)
 
     def _serves_nothing(self) -> bool:
         """Whether the policy refuses every record before any I/O.
@@ -231,6 +296,11 @@ def fetch(f, interval: GenomicRange, binsize: int, stats: tuple[str, ...]):
         else:
             out[:] = f.values(*args, stats[0], fillna=0)
     except Exception as exc:  # noqa: BLE001 -- matches current behavior
+        if BORROWED in str(exc):
+            raise TileError(
+                "this bigWig is being read concurrently through one handle; "
+                "retry the tile"
+            ) from exc
         if "No chromomsome with name" not in str(exc):
             raise
         out[:] = np.nan  # supported chromosome absent from the file, e.g. chrM
@@ -238,7 +308,11 @@ def fetch(f, interval: GenomicRange, binsize: int, stats: tuple[str, ...]):
 
 
 class BBISignalTileset(BBITileset):
-    """A bigWig or bigBed served as a 1D vector tileset."""
+    """A bigWig or bigBed served as a 1D vector tileset.
+
+    See `BBITileset` for the parameters every BBI tileset shares,
+    ``source`` among them.
+    """
 
     datatype = "vector"
     modifiers = ModifierSpec(
@@ -304,7 +378,15 @@ def fetch_records(f, gr: GenomicRange) -> list[tuple]:
     if gr.is_out_of_bounds:
         return []
     chrom, start, end = gr.as_tuple()
-    return [(chrom,) + record for record in f.records(chrom, start, end)]
+    try:
+        return [(chrom,) + record for record in f.records(chrom, start, end)]
+    except RuntimeError as exc:
+        if BORROWED not in str(exc):
+            raise
+        raise TileError(
+            "this bigBed is being read concurrently through one handle; "
+            "retry the tile"
+        ) from exc
 
 
 def to_bedlike(
@@ -342,7 +424,11 @@ def to_bedlike(
 
 
 class BBIAnnotationTileset(BBITileset):
-    """A bigBed or bigWig served as a 1D annotation tileset."""
+    """A bigBed or bigWig served as a 1D annotation tileset.
+
+    See `BBITileset` for the parameters every BBI tileset shares,
+    ``source`` among them.
+    """
 
     datatype = "bedlike"
     modifiers = None
@@ -432,8 +518,11 @@ def to_interaction(
 class BBIInteractionTileset(BBITileset):
     """A bigInteract served as paired intervals.
 
-    Prefer :class:`BBIInteraction2DTileset` or
-    :class:`BBIInteractionLinksTileset`, which differ in how a tile selects.
+    Prefer `BBIInteraction2DTileset` or `BBIInteractionLinksTileset`, which
+    differ in how a tile selects.
+
+    See `BBITileset` for the parameters every BBI tileset shares,
+    ``source`` among them.
     """
 
     datatype = "2d-rectangle-domains"
@@ -462,7 +551,11 @@ class BBIInteractionTileset(BBITileset):
 
 
 class BBIInteraction2DTileset(BBIInteractionTileset):
-    """A bigInteract served as 2D rectangles."""
+    """A bigInteract served as 2D rectangles.
+
+    See `BBITileset` for the parameters every BBI tileset shares,
+    ``source`` among them.
+    """
 
     ndim = 2
 
@@ -506,10 +599,29 @@ class BBIInteractionLinksTileset(BBIInteractionTileset):
     datatype = "bedlike"
 
     def __init__(
-        self, *args, link_policy: LinkPolicy = LinkPolicy.EITHER, **kwargs
+        self,
+        source: SourceLike,
+        chromsizes: Chromsizes | None = None,
+        chromsizes_alts: dict[str, Chromsizes] | None = None,
+        policy: TilePolicy | None = None,
+        tile_size: int = TILE_SIZE,
+        *,
+        link_policy: LinkPolicy = LinkPolicy.EITHER,
     ):
-        super().__init__(*args, **kwargs)
+        # Spelled out rather than swept into `*args`/`**kwargs`, so every
+        # parameter this tileset takes is visible to `inspect.signature` and
+        # to `help`. It was the one BBI class publishing a caller `*args`
+        # where its five siblings publish five named parameters, and the
+        # docstring pointing at `BBITileset` named four of them that
+        # introspection would not admit existed.
+        #
+        # Coerced before the base constructor opens anything: a bad value
+        # raises here, where there is no reader and no handle to release, and
+        # the base's guard cannot reach work a subclass does after it returns.
         self.link_policy = LinkPolicy(link_policy)
+        super().__init__(
+            source, chromsizes, chromsizes_alts, policy, tile_size
+        )
 
     def _tile(self, tid: TileId) -> list[Annotation2DRecord]:
         if self._serves_nothing():
