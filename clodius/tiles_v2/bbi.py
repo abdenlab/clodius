@@ -27,9 +27,14 @@ from clodius.tiles_v2._backed import FileBacked
 
 TILE_SIZE = 1024
 
-#: The suffixes `pybigtools.open` dispatches on. A path ending in anything
-#: else has to be opened here and handed over as a live handle.
-BBI_SUFFIXES = (".bw", ".bigwig", ".bb", ".bigbed")
+#: The suffixes `pybigtools.open` dispatches on, in the exact spellings it
+#: accepts. Case-sensitive, and deliberately not case-folded: `pybigtools`
+#: refuses `signal.BW` as an invalid file type, so folding the comparison
+#: sends a perfectly good bigWig down the path branch to be rejected. A path
+#: ending in anything else is opened here and handed over as a live handle,
+#: which works for every suffix -- so the cost of not recognizing one is a
+#: slower open rather than a tileset that cannot be served at all.
+BBI_SUFFIXES = (".bw", ".bigwig", ".bigWig", ".bb", ".bigbed", ".bigBed")
 
 AGGREGATION_MODES = {
     "mean": "Mean",
@@ -141,7 +146,7 @@ class BBITileset(FileBacked[pybigtools.BBIReader]):
         # any other bigBed flavour) has to be handed an open file instead. A
         # factory-backed source has no path to dispatch on at all.
         path = self._src.path
-        return path is None or not path.lower().endswith(BBI_SUFFIXES)
+        return path is None or not path.endswith(BBI_SUFFIXES)
 
     # --- ProvidesChromsizes -------------------------------------------------
 
