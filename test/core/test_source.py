@@ -33,6 +33,8 @@ import pytest
 
 from clodius.core.source import Source
 
+from ..source_helpers import Unseekable, handle_factory, recording_factory
+
 #: Written by :func:`write` unless a test asks for something else. Asserted
 #: literally rather than compared between two reads, so that a source
 #: returning *nothing* cannot satisfy a test by matching another empty read.
@@ -43,36 +45,6 @@ def write(path, text=CONTENT):
     """Write a small file and return its path as a string."""
     path.write_text(text)
     return str(path)
-
-
-def opener(path):
-    """A factory for ``path``, the shape a caller is expected to pass."""
-    return lambda: open(path, "rb")
-
-
-def recorder(path):
-    """A factory that keeps every handle it hands out, for leak checks."""
-    opened = []
-
-    def factory():
-        handle = open(path, "rb")
-        opened.append(handle)
-        return handle
-
-    return factory, opened
-
-
-class Unseekable(io.RawIOBase):
-    """A handle that cannot report its length, as a pure stream cannot."""
-
-    def readable(self):
-        return True
-
-    def seekable(self):
-        return False
-
-    def seek(self, *args):
-        raise OSError("not seekable")
 
 
 class SeekReturnsNothing(io.RawIOBase):
@@ -226,7 +198,7 @@ def test_coerce_should_return_a_factory_source_when_given_a_callable(tmp_path):
     path = write(tmp_path / "records.bed")
 
     # Act
-    source = Source.coerce(opener(path))
+    source = Source.coerce(handle_factory(path))
 
     # Assert
     assert source.path is None
@@ -369,7 +341,7 @@ def test_for_reader_should_return_the_factory_when_factory_backed(tmp_path):
         so passing it through means there is no adapter to keep correct.
     """
     # Arrange
-    factory = opener(write(tmp_path / "records.bed"))
+    factory = handle_factory(write(tmp_path / "records.bed"))
 
     # Act & assert
     assert Source.coerce(factory).for_reader() is factory
@@ -393,7 +365,7 @@ def test_open_should_read_the_file_for_either_shape(tmp_path):
     # Act
     with Source.coerce(path).open() as left:
         from_path = left.read()
-    with Source.coerce(opener(path)).open() as right:
+    with Source.coerce(handle_factory(path)).open() as right:
         from_factory = right.read()
 
     # Assert
@@ -469,7 +441,7 @@ def test_open_text_should_decode_for_either_shape(tmp_path):
     # Act
     with Source.coerce(path).open_text() as left:
         from_path = left.read()
-    with Source.coerce(opener(path)).open_text() as right:
+    with Source.coerce(handle_factory(path)).open_text() as right:
         from_factory = right.read()
 
     # Assert
@@ -492,7 +464,7 @@ def test_open_text_should_close_the_binary_handle_when_the_wrapper_closes(
         descriptor, and nothing would fail.
     """
     # Arrange
-    factory, opened = recorder(write(tmp_path / "records.fai"))
+    factory, opened = recording_factory(write(tmp_path / "records.fai"))
 
     # Act
     with Source.coerce(factory).open_text() as handle:
@@ -522,7 +494,7 @@ def test_size_should_agree_between_a_path_and_a_factory(tmp_path):
     # Arrange
     path = write(tmp_path / "records.bed", "c1\t0\t5\nc1\t10\t15\n")
     expected = os.path.getsize(path)
-    factory, opened = recorder(path)
+    factory, opened = recording_factory(path)
 
     # Act
     from_path = Source.coerce(path).size()
@@ -741,7 +713,7 @@ def test_sibling_should_return_none_for_a_factory(tmp_path):
     write(tmp_path / "records.bed.gz.tbi")
 
     # Act & assert
-    assert Source.coerce(opener(path)).sibling(".tbi") is None
+    assert Source.coerce(handle_factory(path)).sibling(".tbi") is None
 
 
 def test_has_sibling_should_report_true_when_a_suffix_exists(tmp_path):
@@ -796,7 +768,7 @@ def test___str___should_name_the_shape_when_factory_backed(tmp_path):
         strings reach a server operator through a refusal message.
     """
     # Arrange
-    source = Source.coerce(opener(write(tmp_path / "records.bed")))
+    source = Source.coerce(handle_factory(write(tmp_path / "records.bed")))
 
     # Act & assert
     assert f"{source}" == "<file-like source>"

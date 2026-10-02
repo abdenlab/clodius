@@ -31,6 +31,7 @@ from clodius.core.tileid import TileId
 from clodius.tiles_v2.cooler import CoolerTileset
 
 from ..core.mcool_fixture import build_mcool
+from ..source_helpers import ladder, recording_factory
 
 
 @pytest.fixture(scope="module")
@@ -291,28 +292,6 @@ def test_tiles_should_not_open_a_reader_when_nothing_in_the_batch_is_servable(
     # Assert
     assert [payload["error"] for _, payload in served]
     assert opened == []
-
-
-def ladder(tileset):
-    """Every tile id in a tileset's ladder, coarsest level first."""
-    info = tileset.info()
-    for z in range(len(tileset.resolutions)):
-        n_tiles = info.canvas(z).n_tiles
-        for x in range(n_tiles):
-            for y in range(n_tiles):
-                yield f"u.{z}.{x}.{y}"
-
-
-def recording_factory(path):
-    """A factory that keeps every handle it hands out, for leak checks."""
-    opened = []
-
-    def factory():
-        handle = open(path, "rb")
-        opened.append(handle)
-        return handle
-
-    return factory, opened
 
 
 @pytest.mark.parametrize("modifier", ["", ".weight"])

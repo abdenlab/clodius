@@ -29,6 +29,8 @@ from clodius.core.policies import TilePolicy
 from clodius.core.tileset import TilesetInfo
 from clodius.tiles_v2.multivec import MultivecTileset
 
+from ..source_helpers import recording_factory
+
 #: Two contigs at 1000 and 600 bp, over a 100 bp base resolution.
 CHROMS = [("c1", 1000), ("c2", 600)]
 RESOLUTIONS = [100, 200]
@@ -82,18 +84,6 @@ def bare_mv5(tmp_path_factory):
     """A multivec carrying no row metadata, which never exercised the bug."""
     path = tmp_path_factory.mktemp("multivec") / "bare.mv5"
     return write_multivec(str(path))
-
-
-def recording_factory(path):
-    """A factory that keeps every handle it hands out, for leak checks."""
-    opened = []
-
-    def factory():
-        handle = open(path, "rb")
-        opened.append(handle)
-        return handle
-
-    return factory, opened
 
 
 class TestMultivecTileset:
