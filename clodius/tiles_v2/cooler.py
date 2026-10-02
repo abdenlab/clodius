@@ -413,27 +413,27 @@ class CoolerTileset(H5Backed):
         tile_size: int = TILE_SIZE,
         batched: bool = True,
     ):
-        super().__init__(source)
         self._info = None
-        # Everything below can touch `self.file`, and a raise after it opened
-        # would strand what it opened: the caller never receives the object, so
-        # nothing is left to call `close` on. `close` is idempotent and
-        # null-safe, so this covers whatever a later slice adds here too.
-        try:
-            if chromsizes is not None:
-                self._chromsizes = chromsizes
-            else:
-                clr = self._cooler(self.resolutions[0])
-                self._chromsizes = Chromsizes(
-                    tuple(clr.chromnames),
-                    tuple(int(v) for v in clr.chromsizes.values),
-                )
-            self.policy = policy or TilePolicy()
-            self.tile_size = tile_size
-            self.reader = BatchedBlockReader if batched else BlockReader
-        except Exception:
-            self.close()
-            raise
+        self._given_chromsizes = chromsizes
+        self._policy_arg = policy
+        self._tile_size_arg = tile_size
+        self._batched = batched
+        # `_configure` below runs inside the guard `FileBacked.__init__` owns,
+        # so a raise after the open releases what the open produced.
+        super().__init__(source)
+
+    def _configure(self) -> None:
+        if self._given_chromsizes is not None:
+            self._chromsizes = self._given_chromsizes
+        else:
+            clr = self._cooler(self.resolutions[0])
+            self._chromsizes = Chromsizes(
+                tuple(clr.chromnames),
+                tuple(int(v) for v in clr.chromsizes.values),
+            )
+        self.policy = self._policy_arg or TilePolicy()
+        self.tile_size = self._tile_size_arg
+        self.reader = BatchedBlockReader if self._batched else BlockReader
 
     # --- ProvidesChromsizes -------------------------------------------------
 

@@ -90,19 +90,19 @@ class MultivecTileset(H5Backed):
         policy: TilePolicy | None = None,
         tile_size: int | None = None,
     ):
-        super().__init__(source)
         self._info = None
-        # The `tile-size` read opens the file, and a file that is valid HDF5 but
-        # not a multivec raises here -- after the open succeeded. See the same
-        # guard, and the reason for it, in `cooler.py`.
-        try:
-            self.policy = policy or TilePolicy()
-            self.tile_size = tile_size or int(
-                self.file["info"].attrs["tile-size"]
-            )
-        except Exception:
-            self.close()
-            raise
+        self._policy_arg = policy
+        self._tile_size_arg = tile_size
+        # The `tile-size` read opens the file, and a file that is valid HDF5
+        # but not a multivec raises after that open succeeded. `_configure`
+        # runs inside the guard `FileBacked.__init__` owns, which releases it.
+        super().__init__(source)
+
+    def _configure(self) -> None:
+        self.policy = self._policy_arg or TilePolicy()
+        self.tile_size = self._tile_size_arg or int(
+            self.file["info"].attrs["tile-size"]
+        )
 
     # --- ProvidesChromsizes -------------------------------------------------
 
