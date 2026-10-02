@@ -413,13 +413,9 @@ class CoolerTileset(H5Backed):
         tile_size: int = TILE_SIZE,
         batched: bool = True,
     ):
-        super().__init__(source)
         self._info = None
-        # Everything below can touch `self.file`, and a raise after it opened
-        # would strand what it opened: the caller never receives the object, so
-        # nothing is left to call `close` on. `close` is idempotent and
-        # null-safe, so this covers whatever a later slice adds here too.
-        try:
+        super().__init__(source)
+        with self._releasing_on_error():
             if chromsizes is not None:
                 self._chromsizes = chromsizes
             else:
@@ -430,10 +426,15 @@ class CoolerTileset(H5Backed):
                 )
             self.policy = policy or TilePolicy()
             self.tile_size = tile_size
-            self.reader = BatchedBlockReader if batched else BlockReader
-        except Exception:
+            self._block_reader_cls = (
+                BatchedBlockReader if batched else BlockReader
+            )
+            # Hand back whatever the header read opened, as every backend
+            # over `FileBacked` does. A server registers tilesets it may
+            # never serve, and for a factory source each one it holds is a
+            # live remote connection. `file` reopens on next use, so a served
+            # tileset pays one extra open and an unserved one pays nothing.
             self.close()
-            raise
 
     # --- ProvidesChromsizes -------------------------------------------------
 
@@ -518,7 +519,7 @@ class CoolerTileset(H5Backed):
             # The catch stays narrow. An unopenable file is a whole-request
             # failure, and answering with sixteen cheerful error payloads
             # would be a lie -- which is what the cooler test asserts.
-            with self.reader(clr, canvas, balance) as reader:
+            with self._block_reader_cls(clr, canvas, balance) as reader:
                 reader.prefetch(ids[i].pos for i in servable)
                 for i in servable:
                     try:

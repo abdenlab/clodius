@@ -90,19 +90,22 @@ class MultivecTileset(H5Backed):
         policy: TilePolicy | None = None,
         tile_size: int | None = None,
     ):
-        super().__init__(source)
         self._info = None
-        # The `tile-size` read opens the file, and a file that is valid HDF5 but
-        # not a multivec raises here -- after the open succeeded. See the same
-        # guard, and the reason for it, in `cooler.py`.
-        try:
+        super().__init__(source)
+        # The `tile-size` read opens the file, and a file that is valid HDF5
+        # but not a multivec raises after that open succeeded; the block
+        # below releases what the open produced.
+        with self._releasing_on_error():
             self.policy = policy or TilePolicy()
             self.tile_size = tile_size or int(
                 self.file["info"].attrs["tile-size"]
             )
-        except Exception:
+            # Hand back whatever the header read opened, as every backend
+            # over `FileBacked` does. A server registers tilesets it may
+            # never serve, and for a factory source each one it holds is a
+            # live remote connection. `file` reopens on next use, so a served
+            # tileset pays one extra open and an unserved one pays nothing.
             self.close()
-            raise
 
     # --- ProvidesChromsizes -------------------------------------------------
 
