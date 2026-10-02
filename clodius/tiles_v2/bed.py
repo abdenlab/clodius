@@ -12,6 +12,7 @@ from clodius.core.tile import AnnotationRecord
 from clodius.core.policies import TilePolicy
 from clodius.core.tileid import TileId
 from clodius.core.tileset import BaseTileset, TilesetInfo
+from clodius.core.source import Source
 from clodius.tiles_v2._exprs import known_chroms
 from clodius.tiles_v2._index import indexed_contigs, screen_regions
 
@@ -115,11 +116,6 @@ def to_tile_record(
     }
 
 
-def _has_sibling_index(path: str) -> bool:
-    """Whether oxbow will auto-detect an index next to ``path``."""
-    return any(os.path.exists(path + ext) for ext in (".tbi", ".csi"))
-
-
 class BedTileset(BaseTileset):
     """A plain BED file served as a 1D annotation tileset.
 
@@ -157,9 +153,9 @@ class BedTileset(BaseTileset):
     ):
         self._path = os.fspath(path)
         self._index_path = os.fspath(index_path) if index_path else None
-        self._is_indexed = self._index_path is not None or _has_sibling_index(
+        self._is_indexed = self._index_path is not None or Source.coerce(
             self._path
-        )
+        ).has_sibling(".tbi", ".csi")
         self.policy = policy or TilePolicy()
         self.tile_size = tile_size
         self._chromsizes = chromsizes

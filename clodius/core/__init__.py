@@ -11,6 +11,7 @@ from clodius.core.errors import (
     UnsupportedOption,
 )
 from clodius.core.policies import TilePolicy
+from clodius.core.source import Source, SourceLike
 from clodius.core.tile import (
     Annotation2DRecord,
     AnnotationRecord,
@@ -43,6 +44,8 @@ __all__ = [
     "ModifierSpec",
     "ProvidesChromsizes",
     "ProvidesRegions",
+    "Source",
+    "SourceLike",
     "TileCanvas",
     "TileError",
     "TileId",

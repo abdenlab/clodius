@@ -45,6 +45,7 @@ from clodius.core.policies import (
 )
 from clodius.core.tileid import TileId
 from clodius.core.tileset import BaseTileset, TilesetInfo
+from clodius.core.source import Source
 
 TILE_SIZE = 1024
 TRANSCRIPT_TYPES = frozenset(
@@ -435,10 +436,6 @@ def _codon_starts(cds: list[tuple[int, int]], strand: str) -> tuple[str, str]:
     return (str(lowest), str(highest - 2))
 
 
-def _has_sibling_index(path: str) -> bool:
-    return any(os.path.exists(path + ext) for ext in (".tbi", ".csi"))
-
-
 class GxfTileset(BaseTileset):
     """A GFF3 or GTF served as gene-model tiles.
 
@@ -476,9 +473,9 @@ class GxfTileset(BaseTileset):
     ):
         self._path = os.fspath(path)
         self._index_path = os.fspath(index_path) if index_path else None
-        self._is_indexed = self._index_path is not None or _has_sibling_index(
+        self._is_indexed = self._index_path is not None or Source.coerce(
             self._path
-        )
+        ).has_sibling(".tbi", ".csi")
         self._dialect = dialect or type(self).dialect
         self._chromsizes = chromsizes or self._derive_chromsizes()
         self._info = self._build_info()

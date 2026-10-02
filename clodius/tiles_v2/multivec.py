@@ -13,7 +13,9 @@ from clodius.core.errors import MalformedTileId, TileError
 from clodius.core.tile import DenseTile, DenseTilePayload, TileKind
 from clodius.core.policies import TilePolicy, reconcile
 from clodius.core.tileid import TileId
-from clodius.core.tileset import BaseTileset, TilesetInfo
+from clodius.core.tileset import TilesetInfo
+from clodius.core.source import SourceLike
+from clodius.tiles_v2._h5 import H5Backed
 
 
 def bin_slice(start: int, end: int, binsize: int) -> tuple[int, int]:
@@ -56,8 +58,26 @@ def fetch(
     return grp[interval.name][lo:hi]
 
 
-class MultivecTileset(BaseTileset):
-    """A multi-resolution multivec served as a stack of 1D vectors."""
+class MultivecTileset(H5Backed):
+    """A multi-resolution multivec served as a stack of 1D vectors.
+
+    Parameters
+    ----------
+    source : str, os.PathLike, or callable
+        Where the file's bytes come from: a filesystem path, or a
+        zero-argument callable returning a freshly opened, seekable binary
+        handle each time it is called (``lambda: fs.open(url, "rb")`` and
+        ``lambda: open(p, "rb")`` both qualify). An already-open file is
+        refused, because the obvious repair -- wrapping it as
+        ``lambda: handle`` -- returns the same exhausted handle on every call.
+        A path is handed to ``h5py`` unchanged; a handle this tileset opened is
+        closed by :meth:`close`.
+    policy : TilePolicy, optional
+        Limits applied when serving. Defaults to `TilePolicy`'s own defaults.
+    tile_size : int, optional
+        Bins per tile. Read from the file's ``info/tile-size`` attribute when
+        omitted, which is why constructing a multivec opens its source.
+    """
 
     ndim = 1
     datatype = "multivec"
@@ -66,28 +86,23 @@ class MultivecTileset(BaseTileset):
 
     def __init__(
         self,
-        path,
+        source: SourceLike,
         policy: TilePolicy | None = None,
         tile_size: int | None = None,
     ):
-        self._path = path
-        self._file = None
+        super().__init__(source)
         self._info = None
-        self.policy = policy or TilePolicy()
-        self.tile_size = tile_size or int(self.file["info"].attrs["tile-size"])
-
-    # --- resource lifetime --------------------------------------------------
-
-    @property
-    def file(self) -> h5py.File:
-        if self._file is None:
-            self._file = h5py.File(self._path, "r")
-        return self._file
-
-    def close(self) -> None:
-        if self._file is not None:
-            self._file.close()
-            self._file = None
+        # The `tile-size` read opens the file, and a file that is valid HDF5 but
+        # not a multivec raises here -- after the open succeeded. See the same
+        # guard, and the reason for it, in `cooler.py`.
+        try:
+            self.policy = policy or TilePolicy()
+            self.tile_size = tile_size or int(
+                self.file["info"].attrs["tile-size"]
+            )
+        except Exception:
+            self.close()
+            raise
 
     # --- ProvidesChromsizes -------------------------------------------------
 

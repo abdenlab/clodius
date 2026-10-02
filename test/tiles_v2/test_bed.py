@@ -23,6 +23,8 @@ Every fixture is synthesized into a temp directory, so the module runs on a
 checkout with no git-LFS payload.
 """
 
+import os
+
 import pysam
 import pytest
 
@@ -491,3 +493,29 @@ def test_regions_should_not_repeat_a_record_across_consecutive_pages(
         r[3] for r in PAGED if r is not UNPLACEABLE
     )
     assert has_next is False
+
+
+def test_is_indexed_should_report_false_when_the_candidate_is_a_directory(
+    make_bed,
+):
+    """Test the sibling-index probe against a directory wearing the suffix.
+
+    Given:
+        A plain BED with a *directory* named ``<path>.tbi`` beside it.
+    When:
+        The tileset is constructed.
+    Then:
+        It should not report itself indexed. ``is_indexed`` decides whether a
+        tile range-queries or scans, and a directory is not an index oxbow can
+        read -- the probe used ``os.path.exists``, which a directory satisfies,
+        so the tileset claimed an index and failed on first open.
+    """
+    # Arrange
+    path = make_bed()
+    os.mkdir(path + ".tbi")
+
+    # Act
+    tileset = BedTileset(path, CHROMSIZES)
+
+    # Assert
+    assert tileset.is_indexed is False

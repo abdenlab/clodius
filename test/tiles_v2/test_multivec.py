@@ -84,6 +84,18 @@ def bare_mv5(tmp_path_factory):
     return write_multivec(str(path))
 
 
+def recording_factory(path):
+    """A factory that keeps every handle it hands out, for leak checks."""
+    opened = []
+
+    def factory():
+        handle = open(path, "rb")
+        opened.append(handle)
+        return handle
+
+    return factory, opened
+
+
 class TestMultivecTileset:
     """Serving a multivec whose info carries metadata the model never declared."""
 
@@ -304,3 +316,204 @@ class TestMultivecTileset:
 
         # Assert
         assert payload["shape"] == [N_ROWS, TILE_SIZE]
+
+    def test_tiles_should_agree_between_a_path_and_a_file_like_source(
+        self, stateful_mv5
+    ):
+        """Test the two source shapes against each other across the ladder.
+
+        Given:
+            The same multivec addressed by path and by a callable that opens
+            a fresh binary handle.
+        When:
+            Every tile in the ladder is requested from each.
+        Then:
+            The payloads should match tile for tile, and none should be an
+            error. How the caller spelled the source is not part of the
+            coordinate system, so a remote tileset serving even one tile
+            differently would be serving a different dataset under the same
+            id -- and asserting only that the two agree is satisfied by both
+            refusing every tile.
+        """
+        # Arrange
+        compared = 0
+
+        # Act & assert
+        with (
+            MultivecTileset(stateful_mv5) as by_path,
+            MultivecTileset(lambda: open(stateful_mv5, "rb")) as by_handle,
+        ):
+            info = by_path.info()
+            assert info == by_handle.info()
+            for z in range(len(by_path.resolutions)):
+                for x in range(info.canvas(z).n_tiles):
+                    tile_id = f"u.{z}.{x}"
+                    (_, left), = by_path.tiles(
+                        [by_path.parse_tile_id(tile_id)]
+                    )
+                    (_, right), = by_handle.tiles(
+                        [by_handle.parse_tile_id(tile_id)]
+                    )
+                    assert left == right, tile_id
+                    assert "error" not in left, tile_id
+                    compared += 1
+        assert compared
+
+    def test_tiles_should_reopen_the_source_when_the_tileset_was_closed(
+        self, stateful_mv5
+    ):
+        """Test that a closed tileset is reusable rather than spent.
+
+        Given:
+            A factory-backed tileset that has served a tile and been closed.
+        When:
+            The same tile is requested again.
+        Then:
+            It should be served identically, from a second handle. ``close``
+            nulls the cached file so the property re-opens, which is what
+            makes ``with`` followed by reuse work.
+        """
+        # Arrange
+        factory, opened = recording_factory(stateful_mv5)
+        tileset = MultivecTileset(factory)
+        tile_id = tileset.parse_tile_id("u.0.0")
+        (_, before), = tileset.tiles([tile_id])
+
+        # Act
+        tileset.close()
+        (_, after), = tileset.tiles([tile_id])
+        tileset.close()
+
+        # Assert
+        assert before == after
+        assert len(opened) == 2
+        assert all(handle.closed for handle in opened)
+
+    def test___init___should_refuse_an_already_open_file(self, stateful_mv5):
+        """Test that the one wrong shape fails at construction.
+
+        Given:
+            An open file rather than a callable that opens one.
+        When:
+            A tileset is constructed from it.
+        Then:
+            It should raise ``TypeError``. h5py would accept the handle, so
+            this backend alone would appear to work -- and the same argument
+            given to an oxbow tileset is a source that cannot be reopened.
+        """
+        # Act & assert
+        with open(stateful_mv5, "rb") as handle:
+            with pytest.raises(TypeError, match="not an already open file"):
+                MultivecTileset(handle)
+
+    def test_file_should_close_a_handle_it_could_not_open_as_hdf5(
+        self, tmp_path
+    ):
+        """Test that a failed open does not strand the handle behind it.
+
+        Given:
+            A factory-backed tileset over a file that is not HDF5, accessed
+            several times.
+        When:
+            Each access fails.
+        Then:
+            Every handle opened should be closed. Storing the handle before
+            the open succeeded meant each retry overwrote the only reference
+            to the previous one, so the tileset leaked a handle per attempt
+            while its own contract promised to close what it opened.
+        """
+        # Arrange
+        path = tmp_path / "notan.mv5"
+        path.write_bytes(b"this is not HDF5")
+        factory, opened = recording_factory(str(path))
+        # `tile_size` keeps the constructor from reading the file itself.
+        tileset = MultivecTileset(factory, tile_size=4)
+
+        # Act
+        for _ in range(3):
+            with pytest.raises(OSError):
+                tileset.file
+
+        # Assert
+        assert len(opened) == 3
+        assert all(handle.closed for handle in opened)
+
+    def test_close_should_release_both_the_file_and_the_handle(
+        self, stateful_mv5
+    ):
+        """Test the ownership rule for a caller-supplied factory.
+
+        Given:
+            A factory-backed tileset, used once so that it opens.
+        When:
+            It is closed.
+        Then:
+            Both the HDF5 file and the handle underneath it should be
+            released. ``h5py.File.close()`` does not close a Python file
+            object it was handed, so closing only one of the two leaks a
+            descriptor per tileset.
+        """
+        # Arrange
+        factory, opened = recording_factory(stateful_mv5)
+        tileset = MultivecTileset(factory)
+        hdf5 = tileset.file
+
+        # Act
+        tileset.close()
+
+        # Assert
+        assert not hdf5
+        assert opened and all(handle.closed for handle in opened)
+
+    def test___init___should_close_the_handle_when_the_file_is_not_a_multivec(
+        self, tmp_path
+    ):
+        """Test the ownership rule on the failure the guard did not cover.
+
+        Given:
+            A factory over a file that is valid HDF5 but carries no ``info``
+            group, so the ``tile-size`` read in the constructor raises.
+        When:
+            Construction fails.
+        Then:
+            The handle it opened should already be closed. The constructor
+            raised, so the caller never receives an object to call ``close``
+            on -- and for a factory-backed source the orphan is the caller's
+            remote connection, not a local descriptor.
+        """
+        # Arrange
+        path = tmp_path / "plain.h5"
+        with h5py.File(path, "w") as handle:
+            handle.create_dataset("x", data=[1])
+        factory, opened = recording_factory(path)
+
+        # Act
+        with pytest.raises(KeyError):
+            MultivecTileset(factory)
+
+        # Assert
+        assert opened and all(handle.closed for handle in opened)
+
+    def test_file_should_open_a_path_through_the_native_hdf5_driver(
+        self, stateful_mv5
+    ):
+        """Test that a path still reaches h5py as a path.
+
+        Given:
+            A tileset constructed from a path, and the same file from a
+            factory.
+        When:
+            Each opens its HDF5 file.
+        Then:
+            The path-backed one should use HDF5's native ``sec2`` driver and
+            the factory-backed one ``fileobj``. See the same assertion, and
+            the descriptor cost behind it, in ``test_cooler.py``.
+        """
+        # Arrange & act
+        with (
+            MultivecTileset(stateful_mv5) as by_path,
+            MultivecTileset(lambda: open(stateful_mv5, "rb")) as by_handle,
+        ):
+            # Assert
+            assert by_path.file.driver == "sec2"
+            assert by_handle.file.driver == "fileobj"

@@ -17,7 +17,9 @@ from clodius.core.policies import (
     reconcile_2d,
 )
 from clodius.core.tileid import ModifierSpec, TileId
-from clodius.core.tileset import BaseTileset, TilesetInfo
+from clodius.core.tileset import TilesetInfo
+from clodius.core.source import SourceLike
+from clodius.tiles_v2._h5 import H5Backed
 
 TILE_SIZE = 256
 
@@ -369,11 +371,29 @@ def _bin_count(interval: GenomicRange, binsize: float) -> int:
     )
 
 
-class CoolerTileset(BaseTileset):
+class CoolerTileset(H5Backed):
     """An .mcool served as a 2D matrix tileset.
 
     Parameters
     ----------
+    source : str, os.PathLike, or callable
+        Where the file's bytes come from: a filesystem path, or a
+        zero-argument callable returning a freshly opened, seekable binary
+        handle each time it is called (``lambda: fs.open(url, "rb")`` and
+        ``lambda: open(p, "rb")`` both qualify). An already-open file is
+        refused, because the obvious repair -- wrapping it as
+        ``lambda: handle`` -- returns the same exhausted handle on every call.
+        A path is handed to ``h5py`` unchanged; a handle this tileset opened is
+        closed by :meth:`close`.
+    chromsizes : Chromsizes, optional
+        The coordinate system to serve against. Derived from the file's own
+        bins when omitted, which costs one open at construction.
+    policy : TilePolicy, optional
+        Limits applied when serving. Defaults to `TilePolicy`'s own defaults.
+    tile_size : int, optional [default: 256]
+        Bins per tile edge. The file's ladder is read from its ``resolutions``
+        group, so this sets how many bins one tile covers, not the resolutions
+        available.
     batched : bool, optional [default: True]
         Consolidate fetch operations for sub-batches of tiles to perform as few
         reads as the disk layout allows. If False, perform fetches for each
@@ -387,44 +407,33 @@ class CoolerTileset(BaseTileset):
 
     def __init__(
         self,
-        path,
+        source: SourceLike,
         chromsizes: Chromsizes | None = None,
         policy: TilePolicy | None = None,
         tile_size: int = TILE_SIZE,
         batched: bool = True,
     ):
-        self._path = path
-        self._file = None
+        super().__init__(source)
         self._info = None
-        if chromsizes is not None:
-            self._chromsizes = chromsizes
-        else:
-            clr = self._cooler(self.resolutions[0])
-            self._chromsizes = Chromsizes(
-                tuple(clr.chromnames),
-                tuple(int(v) for v in clr.chromsizes.values),
-            )
-        self.policy = policy or TilePolicy()
-        self.tile_size = tile_size
-        self.reader = BatchedBlockReader if batched else BlockReader
-
-    # --- resource lifetime --------------------------------------------------
-
-    @property
-    def file(self) -> h5py.File:
-        if self._file is None:
-            self._file = h5py.File(self._path, "r")
-            if "resolutions" not in self._file:
-                raise ValueError(
-                    f"{self._path} has no 'resolutions' group. Legacy "
-                    "multi-resolution cooler files are served by cooler.py."
+        # Everything below can touch `self.file`, and a raise after it opened
+        # would strand what it opened: the caller never receives the object, so
+        # nothing is left to call `close` on. `close` is idempotent and
+        # null-safe, so this covers whatever a later slice adds here too.
+        try:
+            if chromsizes is not None:
+                self._chromsizes = chromsizes
+            else:
+                clr = self._cooler(self.resolutions[0])
+                self._chromsizes = Chromsizes(
+                    tuple(clr.chromnames),
+                    tuple(int(v) for v in clr.chromsizes.values),
                 )
-        return self._file
-
-    def close(self) -> None:
-        if self._file is not None:
-            self._file.close()
-            self._file = None
+            self.policy = policy or TilePolicy()
+            self.tile_size = tile_size
+            self.reader = BatchedBlockReader if batched else BlockReader
+        except Exception:
+            self.close()
+            raise
 
     # --- ProvidesChromsizes -------------------------------------------------
 
@@ -519,6 +528,19 @@ class CoolerTileset(BaseTileset):
         return [(tid, payloads[i]) for i, tid in enumerate(ids)]
 
     # --- internals ----------------------------------------------------------
+
+    def _validate(self, file: h5py.File) -> None:
+        # `TilesetUnavailable` rather than `ValueError`: the file is readable
+        # and simply is not this tileset's format, which is a whole-request
+        # fault a server should render as a refusal. A bare `ValueError` is not
+        # a `TilesetError`, so it escaped the boundary as a 500 -- the same
+        # outcome the cached-`KeyError` bug produced, which is what making this
+        # refusal repeatable was meant to fix.
+        if "resolutions" not in file:
+            raise TilesetUnavailable(
+                f"{self._src} has no 'resolutions' group. Legacy "
+                "multi-resolution cooler files are served by cooler.py."
+            )
 
     def _cooler(self, resolution) -> cooler.Cooler:
         # int() is load-bearing: canvas.binsize is a float, and the resolution

@@ -49,6 +49,11 @@ tsv_to_mrmatrix = "clodius.cli._tsv_to_mrmatrix:main"
 [dependency-groups]
 dev = [
     "bumpversion",
+    # Not a runtime dependency, and deliberately so: a tileset source is a
+    # plain `Callable[[], IO[bytes]]`, which fsspec satisfies structurally.
+    # It is here only so the tests can show a real remote-capable filesystem
+    # meeting that contract without clodius importing it.
+    "fsspec",
     "pytest",
     "pytest-cov",
     "ruff",

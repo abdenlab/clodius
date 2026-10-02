@@ -531,6 +531,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "bumpversion" },
+    { name = "fsspec" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
@@ -569,6 +570,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "bumpversion" },
+    { name = "fsspec" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
