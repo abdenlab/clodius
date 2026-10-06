@@ -6,7 +6,16 @@ hand-written copies, and every gap in the protocol was a gap in one copy or
 the other -- a publication order that a concurrent `close` could slip between,
 a constructor that orphaned its handle, an unlocked check-then-act, a reader
 dropped for the garbage collector rather than closed. It lives here instead,
-so a fix lands once and the next backend inherits it.
+so a fix lands once and the next backend in this package inherits it.
+
+**This module is internal.** The leading underscore is the contract:
+``clodius/tiles_v2/__init__.py`` is empty, so the only way to name
+`FileBacked` is the private path, and the override protocol below --
+`_reader_open`, `_validate`, `_needs_handle` -- is addressed to the backends
+in this package rather than to a third party. Renaming a member here is not a
+public API break, and should not be recorded as one. Publishing the protocol
+is a decision for whichever slice has an out-of-tree subclass to serve; it
+has none today.
 
 That includes the whole of construction, which subclasses used to hand-write:
 a subclass does its header read inside :meth:`FileBacked._configuring`, which
@@ -14,12 +23,17 @@ releases what the read opened whether the block raises or returns. Both halves
 used to be the subclass's to remember, and the release half was three
 near-identical copies with a byte-identical rationale comment.
 
-There is no test module for this protocol. It is pinned once per backend
-instead, in `test/tiles_v2/test_bbi.py` and `test/tiles_v2/test_cooler.py`,
-which is the same duplication this module removed from the source. A suite
-parametrized over ``(tileset_cls, fixture, source_shape)`` is owed, and is
-the right place for the tests the BBI module currently carries on this
-class's behalf; it is deferred to the oxbow slices rather than forgotten.
+`test/tiles_v2/test_backed.py` covers the arms that only fire when *cleanup*
+fails -- a reader whose own ``close`` raises, on each of the two paths that
+release one -- because no real backend can be asked to fail that way, and
+those arms all suppress, so a wrong one is wrong silently. The rest of the
+protocol is pinned once per backend, in `test_bbi.py`, `test_cooler.py` and
+`test_multivec.py` -- eight behaviours under identical names in two or three
+modules, which is the same duplication this module removed from the source. A
+suite parametrized over ``(tileset_cls, fixture, source_shape)`` would collapse
+them. It was surfaced as a proposal and **the maintainer ruled it out of scope
+for this slice**; the duplication is recorded here as a known cost, not as a
+disposition this module granted itself.
 
 Lives in ``tiles_v2`` rather than beside `clodius.core.source.Source`, which
 it builds on, because a subclass names its reader's type and ``clodius.core``
@@ -31,9 +45,8 @@ from __future__ import annotations
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import IO
 
-from clodius.core.source import Source, SourceLike
+from clodius.core.source import BinaryHandle, Source, SourceLike
 from clodius.core.tileset import BaseTileset
 
 
@@ -41,17 +54,28 @@ class FileBacked[_R](BaseTileset):
     """A tileset whose bytes are one file, read through one reader object.
 
     ``_R`` is the reader a subclass opens -- an ``h5py.File``, a
-    ``pybigtools.BBIReader``. It is unbounded deliberately: the only thing
-    this class asks of a reader is a ``close()``, and a ``Closeable`` protocol
-    bound would not hold for ``pybigtools.BBIReader``, which reaches ``close``
-    through ``__getattr__`` on its Python wrapper and so satisfies the shape
-    per instance rather than per class.
+    ``pybigtools.BBIReader``. The only thing this class asks of a reader is a
+    ``close()``, and the parameter is left unbounded anyway, because whether a
+    ``Closeable`` protocol bound *holds* for ``pybigtools.BBIReader`` -- which
+    reaches ``close`` through ``__getattr__`` on its Python wrapper, and so
+    satisfies the shape per instance rather than per class -- depends on the
+    checker: mypy accepts a `__getattr__`-only class as a protocol bound,
+    pyright rejects it. So the bound is not impossible, it is not portable.
+    The cost of leaving it off is that mypy reports ``"_R" has no attribute
+    "close"`` at :meth:`close` and in `_open`'s validation arm; the project
+    runs no checker in CI, so that costs nothing today and is the thing to
+    revisit if one is added.
 
     Opens lazily, on first use of the reader, so constructing a tileset over
     an unreachable source is not itself an error. :meth:`reading` is the only
     public way in; the reader itself is not published, because for BBI it
-    carries a serialization constraint a caller holding the bare object has no
-    way to honor.
+    carries a serialization constraint that a caller holding the bare object
+    is given no way to see. Note what that does and does not buy:
+    :meth:`reading` yields the reader and nothing invalidates it on exit, so
+    a caller who keeps what it yielded can still drive it outside the block.
+    The constraint is therefore stated and not enforced -- a reader must not
+    be used outside the block that yielded it -- and the privacy makes the
+    unsafe route harder to reach rather than unreachable.
 
     *Registration is free.* A subclass that reads a header has opened the
     source by the time construction returns, and :meth:`_configuring` closes
@@ -93,15 +117,18 @@ class FileBacked[_R](BaseTileset):
     ``with`` block gets a second handle, owned on the same terms as the first.
     """
 
-    _src: Source
     _reader: _R | None
-    _handle: IO[bytes] | None
+    _handle: BinaryHandle | None
+    _unclosed: list[_R]
     _lock: threading.Lock
 
     def __init__(self, source: SourceLike) -> None:
         self._src = Source.coerce(source)
         self._reader = None
         self._handle = None
+        # Readers a previous `close` could not close. Empty in every ordinary
+        # life; see :meth:`close` for why they are kept rather than dropped.
+        self._unclosed = []
         self._lock = threading.Lock()
 
     @contextmanager
@@ -122,19 +149,63 @@ class FileBacked[_R](BaseTileset):
         yield self._opened()
 
     def close(self) -> None:
-        """Release the reader and any handle this tileset opened."""
+        """Release the reader and any handle this tileset opened.
+
+        Idempotent, and *retryable*. A reader's own ``close`` can fail -- for
+        BBI it raises `RuntimeError: Already borrowed` when a query is in
+        flight, because this method deliberately does not hold the read lock
+        -- and the failure must not cost the caller the only reference to it.
+        A reader that could not be closed is therefore kept, and the next
+        `close` reclaims it.
+
+        Kept *aside*, in `_unclosed`, rather than left in `_reader`. Putting
+        it back there would republish it: :meth:`_opened` returns a non-`None`
+        `_reader` without taking the lock, so the next read would be served
+        through a reader whose handle this same call has already closed, and
+        the tileset would stop reopening until something closed it again.
+
+        The handle is released whichever way the reader goes, in a `finally`,
+        because the two do not release each other -- neither
+        ``h5py.File.close()`` nor ``BBIReader.close()`` closes a Python file
+        object it was handed.
+
+        Both are closed *outside* `_lock`, with only the detaching done under
+        it. For a factory source the handle is the caller's remote connection
+        and its teardown is a round trip: holding the lock across it stalled
+        every concurrent :meth:`_opened` on a tileset that was already
+        detached -- measured at a 355 ms wait on a reopen behind a handle
+        whose ``close`` takes 400 ms, all of it lock-wait. Nothing needs the
+        lock held that long: a concurrent `_opened` calls the factory for a
+        *fresh* handle, and the references are gone before either close runs.
+        """
         with self._lock:
-            try:
-                if self._reader is not None:
-                    self._reader.close()
-            finally:
-                # `finally`, because a failed reader close must not strand the
-                # handle: leaving `_reader` set would make every retry raise at
-                # the same point and the handle would never be reached again.
-                self._reader = None
-                handle, self._handle = self._handle, None
-                if handle is not None:
-                    handle.close()
+            pending, self._unclosed = self._unclosed, []
+            if self._reader is not None:
+                pending.append(self._reader)
+            self._reader = None
+            handle, self._handle = self._handle, None
+        failed: list[_R] = []
+        failure: BaseException | None = None
+        try:
+            for reader in pending:
+                try:
+                    reader.close()
+                except BaseException as exc:  # noqa: BLE001 -- re-raised below
+                    # `BaseException`, because the point is not to lose the
+                    # reference: a cancellation landing mid-close orphans a
+                    # reader exactly as an `OSError` does. Re-raised after the
+                    # handle is released, so the delay is one close.
+                    failed.append(reader)
+                    if failure is None:
+                        failure = exc
+            if handle is not None:
+                handle.close()
+        finally:
+            if failed:
+                with self._lock:
+                    self._unclosed.extend(failed)
+        if failure is not None:
+            raise failure
 
     def _opened(self) -> _R:
         """The open reader, opening it on first access.
@@ -299,7 +370,7 @@ class FileBacked[_R](BaseTileset):
         """
         return self._src.path is None
 
-    def _reader_open(self, target: str | IO[bytes]) -> _R:
+    def _reader_open(self, target: str | BinaryHandle) -> _R:
         """Open ``target``: a path string, or a handle this tileset owns."""
         raise NotImplementedError(
             f"{type(self).__name__} must implement _reader_open"
