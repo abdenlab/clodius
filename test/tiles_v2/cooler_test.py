@@ -42,7 +42,7 @@ def recorder():
 def tileset(path, reader=None, cls=ctiles.CoolerTileset, **kwargs):
     ts = cls(path, **kwargs)
     if reader is not None:
-        ts.reader = reader
+        ts.block_reader_cls = reader
     return ts
 
 

@@ -11,14 +11,14 @@ from cooler.util import open_hdf5
 
 from clodius.core.coords import Chromsizes, GenomicRange
 from clodius.core.errors import TileError, TilesetUnavailable
-from clodius.core.tile import DenseTile, TileKind
 from clodius.core.policies import (
     TilePolicy,
     reconcile_2d,
 )
+from clodius.core.source import SourceLike
+from clodius.core.tile import DenseTile, TileKind
 from clodius.core.tileid import ModifierSpec, TileId
 from clodius.core.tileset import TilesetInfo
-from clodius.core.source import SourceLike
 from clodius.tiles_v2._h5 import H5Backed
 
 TILE_SIZE = 256
@@ -376,15 +376,17 @@ class CoolerTileset(H5Backed):
 
     Parameters
     ----------
-    source : str, os.PathLike, or callable
+    source : str, bytes, os.PathLike, Source, or callable
         Where the file's bytes come from: a filesystem path, or a
         zero-argument callable returning a freshly opened, seekable binary
         handle each time it is called (``lambda: fs.open(url, "rb")`` and
         ``lambda: open(p, "rb")`` both qualify). An already-open file is
         refused, because the obvious repair -- wrapping it as
         ``lambda: handle`` -- returns the same exhausted handle on every call.
-        A path is handed to ``h5py`` unchanged; a handle this tileset opened is
-        closed by :meth:`close`.
+        An already-normalized `clodius.core.source.Source` is accepted too, so
+        a caller who coerced once can reuse the result. A path is handed to
+        ``h5py`` unchanged; a handle this tileset opened is closed by
+        :meth:`close`.
     chromsizes : Chromsizes, optional
         The coordinate system to serve against. Derived from the file's own
         bins when omitted, which costs one open at construction.
@@ -398,6 +400,23 @@ class CoolerTileset(H5Backed):
         Consolidate fetch operations for sub-batches of tiles to perform as few
         reads as the disk layout allows. If False, perform fetches for each
         tile independently.
+
+    Attributes
+    ----------
+    block_reader_cls : type[BlockReader]
+        The block-reader *class* the batch loop constructs through, selected
+        by ``batched``. Public so a caller can substitute one -- an
+        instrumented reader, say -- without reaching into private state;
+        ``_cls`` because it holds the class rather than a reader, which the
+        plain name ``reader`` it replaces did not say.
+
+        A substitute **subclasses** `BlockReader`, which is public for that
+        reason and is how `cooler_test.py` already does it. That is the whole
+        of the contract, and it is stated because the type alone does not say
+        it: the batch loop constructs it with ``(clr, canvas, balance)``,
+        enters it with ``with``, and calls `prefetch`, `block` and `close` --
+        five members, inherited for free by a subclass and each one a thing a
+        from-scratch substitute would have had to guess at.
     """
 
     ndim = 2
@@ -413,13 +432,9 @@ class CoolerTileset(H5Backed):
         tile_size: int = TILE_SIZE,
         batched: bool = True,
     ):
-        super().__init__(source)
         self._info = None
-        # Everything below can touch `self.file`, and a raise after it opened
-        # would strand what it opened: the caller never receives the object, so
-        # nothing is left to call `close` on. `close` is idempotent and
-        # null-safe, so this covers whatever a later slice adds here too.
-        try:
+        super().__init__(source)
+        with self._configuring():
             if chromsizes is not None:
                 self._chromsizes = chromsizes
             else:
@@ -430,10 +445,9 @@ class CoolerTileset(H5Backed):
                 )
             self.policy = policy or TilePolicy()
             self.tile_size = tile_size
-            self.reader = BatchedBlockReader if batched else BlockReader
-        except Exception:
-            self.close()
-            raise
+            self.block_reader_cls = (
+                BatchedBlockReader if batched else BlockReader
+            )
 
     # --- ProvidesChromsizes -------------------------------------------------
 
@@ -442,7 +456,8 @@ class CoolerTileset(H5Backed):
 
     @property
     def resolutions(self) -> tuple[int, ...]:
-        return tuple(sorted(int(r) for r in self.file["resolutions"].keys()))
+        groups = self._opened()["resolutions"].keys()
+        return tuple(sorted(int(r) for r in groups))
 
     def info(self) -> TilesetInfo:
         if self._info is None:
@@ -518,7 +533,7 @@ class CoolerTileset(H5Backed):
             # The catch stays narrow. An unopenable file is a whole-request
             # failure, and answering with sixteen cheerful error payloads
             # would be a lie -- which is what the cooler test asserts.
-            with self.reader(clr, canvas, balance) as reader:
+            with self.block_reader_cls(clr, canvas, balance) as reader:
                 reader.prefetch(ids[i].pos for i in servable)
                 for i in servable:
                     try:
@@ -545,7 +560,8 @@ class CoolerTileset(H5Backed):
     def _cooler(self, resolution) -> cooler.Cooler:
         # int() is load-bearing: canvas.binsize is a float, and the resolution
         # groups are named "8000", not "8000.0".
-        return cooler.Cooler(self.file["resolutions"][str(int(resolution))])
+        group = self._opened()["resolutions"][str(int(resolution))]
+        return cooler.Cooler(group)
 
     def _build_info(self) -> TilesetInfo:
         resolutions = self.resolutions

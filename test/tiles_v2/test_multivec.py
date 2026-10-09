@@ -29,6 +29,8 @@ from clodius.core.policies import TilePolicy
 from clodius.core.tileset import TilesetInfo
 from clodius.tiles_v2.multivec import MultivecTileset
 
+from ..source_helpers import handle_factory, ladder, recording_factory
+
 #: Two contigs at 1000 and 600 bp, over a 100 bp base resolution.
 CHROMS = [("c1", 1000), ("c2", 600)]
 RESOLUTIONS = [100, 200]
@@ -82,18 +84,6 @@ def bare_mv5(tmp_path_factory):
     """A multivec carrying no row metadata, which never exercised the bug."""
     path = tmp_path_factory.mktemp("multivec") / "bare.mv5"
     return write_multivec(str(path))
-
-
-def recording_factory(path):
-    """A factory that keeps every handle it hands out, for leak checks."""
-    opened = []
-
-    def factory():
-        handle = open(path, "rb")
-        opened.append(handle)
-        return handle
-
-    return factory, opened
 
 
 class TestMultivecTileset:
@@ -341,22 +331,21 @@ class TestMultivecTileset:
         # Act & assert
         with (
             MultivecTileset(stateful_mv5) as by_path,
-            MultivecTileset(lambda: open(stateful_mv5, "rb")) as by_handle,
+            MultivecTileset(handle_factory(stateful_mv5)) as by_handle,
         ):
-            info = by_path.info()
-            assert info == by_handle.info()
-            for z in range(len(by_path.resolutions)):
-                for x in range(info.canvas(z).n_tiles):
-                    tile_id = f"u.{z}.{x}"
-                    (_, left), = by_path.tiles(
-                        [by_path.parse_tile_id(tile_id)]
-                    )
-                    (_, right), = by_handle.tiles(
-                        [by_handle.parse_tile_id(tile_id)]
-                    )
-                    assert left == right, tile_id
-                    assert "error" not in left, tile_id
-                    compared += 1
+            assert by_path.info() == by_handle.info()
+            # `ladder`, not a hand-rolled walk: it is arity-aware and reads
+            # the zoom count off `info.num_zoom_levels`, where the walk here
+            # read it off `len(resolutions)` -- a second expression of one
+            # fact, in a module whose whole subject is the ladder.
+            for tile_id in ladder(by_path):
+                (_, left), = by_path.tiles([by_path.parse_tile_id(tile_id)])
+                (_, right), = by_handle.tiles(
+                    [by_handle.parse_tile_id(tile_id)]
+                )
+                assert left == right, tile_id
+                assert "error" not in left, tile_id
+                compared += 1
         assert compared
 
     def test_tiles_should_reopen_the_source_when_the_tileset_was_closed(
@@ -386,7 +375,10 @@ class TestMultivecTileset:
 
         # Assert
         assert before == after
-        assert len(opened) == 2
+        # Three: construction reads `tile-size` and hands the handle back,
+        # then each of the two serves opens again. Registration holding
+        # nothing is what the first of those three pays for.
+        assert len(opened) == 3
         assert all(handle.closed for handle in opened)
 
     def test___init___should_refuse_an_already_open_file(self, stateful_mv5):
@@ -406,7 +398,7 @@ class TestMultivecTileset:
             with pytest.raises(TypeError, match="not an already open file"):
                 MultivecTileset(handle)
 
-    def test_file_should_close_a_handle_it_could_not_open_as_hdf5(
+    def test_reading_should_close_a_handle_it_could_not_open_as_hdf5(
         self, tmp_path
     ):
         """Test that a failed open does not strand the handle behind it.
@@ -431,8 +423,8 @@ class TestMultivecTileset:
 
         # Act
         for _ in range(3):
-            with pytest.raises(OSError):
-                tileset.file
+            with pytest.raises(OSError), tileset.reading():
+                pass
 
         # Assert
         assert len(opened) == 3
@@ -456,7 +448,8 @@ class TestMultivecTileset:
         # Arrange
         factory, opened = recording_factory(stateful_mv5)
         tileset = MultivecTileset(factory)
-        hdf5 = tileset.file
+        with tileset.reading() as hdf5:
+            pass
 
         # Act
         tileset.close()
@@ -494,7 +487,7 @@ class TestMultivecTileset:
         # Assert
         assert opened and all(handle.closed for handle in opened)
 
-    def test_file_should_open_a_path_through_the_native_hdf5_driver(
+    def test_reading_should_open_a_path_through_the_native_hdf5_driver(
         self, stateful_mv5
     ):
         """Test that a path still reaches h5py as a path.
@@ -512,8 +505,9 @@ class TestMultivecTileset:
         # Arrange & act
         with (
             MultivecTileset(stateful_mv5) as by_path,
-            MultivecTileset(lambda: open(stateful_mv5, "rb")) as by_handle,
+            MultivecTileset(handle_factory(stateful_mv5)) as by_handle,
         ):
             # Assert
-            assert by_path.file.driver == "sec2"
-            assert by_handle.file.driver == "fileobj"
+            with by_path.reading() as native, by_handle.reading() as wrapped:
+                assert native.driver == "sec2"
+                assert wrapped.driver == "fileobj"

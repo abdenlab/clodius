@@ -16,7 +16,6 @@ committed multires cooler is a legacy implicit-ladder file with no
 """
 
 import os
-import threading
 
 import h5py
 import pytest
@@ -31,6 +30,7 @@ from clodius.core.tileid import TileId
 from clodius.tiles_v2.cooler import CoolerTileset
 
 from ..core.mcool_fixture import build_mcool
+from ..source_helpers import ladder, recording_factory, released_together
 
 
 @pytest.fixture(scope="module")
@@ -272,17 +272,20 @@ def test_tiles_should_not_open_a_reader_when_nothing_in_the_batch_is_servable(
         finely binned genome -- and a raise inside it would discard the error
         payloads already recorded for the batch.
     """
-    # Arrange. `reader` is the instance attribute the batch loop constructs
-    # through, so wrapping it counts openings without reaching into internals.
+    # Arrange. `block_reader_cls` is what the batch loop constructs through,
+    # so substituting it counts openings without reaching into private state.
+    # A subclass, which is the contract the attribute documents -- a plain
+    # function satisfied the loop and contradicted the declared
+    # `type[BlockReader]`.
     tileset = CoolerTileset(symmetric_mcool)
     opened = []
-    build = tileset.reader
 
-    def counting_reader(*args, **kwargs):
-        opened.append(args)
-        return build(*args, **kwargs)
+    class CountingReader(tileset.block_reader_cls):
+        def __init__(self, clr, canvas, balance):
+            opened.append((clr, canvas, balance))
+            super().__init__(clr, canvas, balance)
 
-    tileset.reader = counting_reader
+    tileset.block_reader_cls = CountingReader
     ids = [tileset.parse_tile_id(f"u.0.{x}.0") for x in (9999, 8888)]
 
     # Act
@@ -291,28 +294,6 @@ def test_tiles_should_not_open_a_reader_when_nothing_in_the_batch_is_servable(
     # Assert
     assert [payload["error"] for _, payload in served]
     assert opened == []
-
-
-def ladder(tileset):
-    """Every tile id in a tileset's ladder, coarsest level first."""
-    info = tileset.info()
-    for z in range(len(tileset.resolutions)):
-        n_tiles = info.canvas(z).n_tiles
-        for x in range(n_tiles):
-            for y in range(n_tiles):
-                yield f"u.{z}.{x}.{y}"
-
-
-def recording_factory(path):
-    """A factory that keeps every handle it hands out, for leak checks."""
-    opened = []
-
-    def factory():
-        handle = open(path, "rb")
-        opened.append(handle)
-        return handle
-
-    return factory, opened
 
 
 @pytest.mark.parametrize("modifier", ["", ".weight"])
@@ -384,7 +365,10 @@ def test_tiles_should_reopen_the_source_when_the_tileset_was_closed(
 
     # Assert
     assert before == after
-    assert len(opened) == 2
+    # Three: construction reads the header and hands it back, then each of
+    # the two serves opens again. Registration holding nothing is what the
+    # first of those three pays for.
+    assert len(opened) == 3
     assert all(handle.closed for handle in opened)
 
 
@@ -435,7 +419,7 @@ def test___init___should_close_the_handle_it_opened_when_the_file_is_rejected(
     assert opened and all(handle.closed for handle in opened)
 
 
-def test_file_should_close_a_handle_it_could_not_open_as_hdf5(tmp_path):
+def test_reading_should_close_a_handle_it_could_not_open_as_hdf5(tmp_path):
     """Test that a failed open does not strand the handle behind it.
 
     Given:
@@ -457,15 +441,15 @@ def test_file_should_close_a_handle_it_could_not_open_as_hdf5(tmp_path):
 
     # Act
     for _ in range(3):
-        with pytest.raises(OSError):
-            tileset.file
+        with pytest.raises(OSError), tileset.reading():
+            pass
 
     # Assert
     assert len(opened) == 3
     assert all(handle.closed for handle in opened)
 
 
-def test_file_should_raise_the_same_error_every_time_there_is_no_resolutions(
+def test_info_should_raise_the_same_error_every_time_there_is_no_resolutions(
     fixture_path,
 ):
     """Test that a refusal stays a refusal instead of decaying.
@@ -510,7 +494,8 @@ def test_close_should_release_both_the_file_and_the_handle(symmetric_mcool):
     # Arrange
     factory, opened = recording_factory(symmetric_mcool)
     tileset = CoolerTileset(factory)
-    hdf5 = tileset.file
+    with tileset.reading() as hdf5:
+        pass
 
     # Act
     tileset.close()
@@ -541,7 +526,7 @@ def test___repr___should_name_the_source_the_tileset_serves(symmetric_mcool):
     )
 
 
-def test_file_should_open_a_path_through_the_native_hdf5_driver(
+def test_reading_should_open_a_path_through_the_native_hdf5_driver(
     symmetric_mcool,
 ):
     """Test the claim that makes adopting the source abstraction safe.
@@ -563,11 +548,15 @@ def test_file_should_open_a_path_through_the_native_hdf5_driver(
         CoolerTileset(lambda: open(symmetric_mcool, "rb")) as by_handle,
     ):
         # Assert
-        assert by_path.file.driver == "sec2"
-        assert by_handle.file.driver == "fileobj"
+        with by_path.reading() as native, by_handle.reading() as wrapped:
+            assert native.driver == "sec2"
+            assert wrapped.driver == "fileobj"
 
 
-def test_file_should_share_one_descriptor_across_path_backed_tilesets(
+@pytest.mark.skipif(
+    not os.path.isdir("/dev/fd"), reason="no /dev/fd on this platform"
+)
+def test_reading_should_share_one_descriptor_across_path_backed_tilesets(
     symmetric_mcool,
 ):
     """Test the consequence the driver choice actually has on a server.
@@ -589,7 +578,8 @@ def test_file_should_share_one_descriptor_across_path_backed_tilesets(
     tilesets = [CoolerTileset(symmetric_mcool) for _ in range(20)]
     try:
         for tileset in tilesets:
-            tileset.file
+            with tileset.reading():
+                pass
         # Assert
         assert len(os.listdir("/dev/fd")) - count == 1
     finally:
@@ -597,7 +587,7 @@ def test_file_should_share_one_descriptor_across_path_backed_tilesets(
             tileset.close()
 
 
-def test_file_should_call_the_factory_once_under_concurrent_first_access(
+def test_reading_should_call_the_factory_once_under_concurrent_first_access(
     symmetric_mcool,
 ):
     """Test the lazy open against the threading a tile server actually does.
@@ -611,29 +601,39 @@ def test_file_should_call_the_factory_once_under_concurrent_first_access(
         every thread opens its own, the last writer wins, and the losers are
         handles ``close`` can no longer reach -- a caller's handle has no
         finalizer to fall back on.
+
+        Through the shared `released_together`, which uses daemon threads and
+        a bounded join: if the lock regresses to the deadlock this test
+        exists to detect, a non-daemon thread wedged on it fails the test and
+        then hangs the interpreter forever at exit, so the report is never
+        printed and the suite stalls instead of failing.
     """
     # Arrange
     factory, opened = recording_factory(symmetric_mcool)
     tileset = CoolerTileset(factory)
-    barrier = threading.Barrier(8)
     seen = []
 
     def touch():
-        barrier.wait()
-        seen.append(id(tileset.file))
+        with tileset.reading() as reader:
+            seen.append(id(reader))
 
     # Act
-    threads = [threading.Thread(target=touch) for _ in range(8)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    alive, failures = released_together([touch] * 8)
 
     # Assert
+    assert alive == [False] * 8
+    assert failures == []
     assert len(set(seen)) == 1
-    assert len(opened) == 1
+    # Two: one at construction for the header, which was handed straight
+    # back, and one for this first access. What the lock is being tested for
+    # is that eight threads added exactly one between them, not zero or
+    # eight.
+    assert len(opened) == 2
     tileset.close()
-    assert [handle.closed for handle in opened] == [True]
+    # Both: construction's was handed back at the time, and `close` reaches
+    # the one the eight threads shared. A handle the lock failed to prevent
+    # would show up here as a third, still open.
+    assert [handle.closed for handle in opened] == [True, True]
 
 
 def test_close_should_release_the_handle_when_the_hdf5_close_raises(
@@ -653,7 +653,8 @@ def test_close_should_release_the_handle_when_the_hdf5_close_raises(
     # Arrange
     factory, opened = recording_factory(symmetric_mcool)
     tileset = CoolerTileset(factory)
-    tileset.file
+    with tileset.reading():
+        pass
 
     def boom(self):
         raise OSError("flush failed")
@@ -664,5 +665,6 @@ def test_close_should_release_the_handle_when_the_hdf5_close_raises(
     with pytest.raises(OSError, match="flush failed"):
         tileset.close()
 
-    # Assert
-    assert [handle.closed for handle in opened] == [True]
+    # Assert. Two handles: construction's, closed before `h5py.File.close`
+    # was patched, and this one. The second is what the `finally` reaches.
+    assert [handle.closed for handle in opened] == [True, True]
